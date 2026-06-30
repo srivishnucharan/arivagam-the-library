@@ -40,15 +40,24 @@ const dbToUser = (u) => ({
   role: u.role, status: u.status, membershipType: u.membership_type || "annual",
   fees: parseFloat(u.fees_due) || 0,
   joined: u.joined_at ? u.joined_at.split("T")[0] : new Date().toISOString().split("T")[0],
+  enrollmentDate: u.enrollment_date ? u.enrollment_date.split("T")[0] : "",
   password: u.password || "", branch: u.branch_id || "",
   plan: u.plan || null,
+  planDescription: u.membership_plan_description || "",
   planRenewedAt: u.plan_renewed_at || null,
   upiId: u.upi_id || "",
   renewalRequestedAt: u.renewal_requested_at || null,
-  guardianName: u.guardian_name || "",
+  childMemberName: u.child_member_name || "",
+  childMemberDOB: u.child_member_dateofbirth || "",
+  guardianName: u.parent_guardian_name || u.guardian_name || "",
+  relationshipToMember: u.relationship_to_the_member || "",
+  altPhone: u.alternate_phone_number || "",
   address: u.address || "",
-  paymentMode: u.payment_mode || "",
-  notes: u.notes || "",
+  paymentMethod: u.payment_method || u.payment_mode || "",
+  registrationFees: u.onetime_registration_fees != null ? String(u.onetime_registration_fees) : "",
+  offerType: u.offer_type || "",
+  refundableDeposit: u.refundable_deposit != null ? String(u.refundable_deposit) : "",
+  comments: u.comments || "",
 });
 const dbToTxn = (t) => ({
   id: t.id, memberId: t.member_id,
@@ -731,7 +740,7 @@ const NavLink = ({ label, active, onClick, chevron }) => (
 // ─────────────────────────────────────────────────────────────────────────────
 // LOGIN PAGE  (3-tab: Member / Librarian / Admin)
 // ─────────────────────────────────────────────────────────────────────────────
-const ForgotPasswordModal = ({ onClose }) => {
+const ForgotPasswordModal = ({ onClose, role = "member" }) => {
   const [fpEmail, setFpEmail]   = useState("");
   const [fpState, setFpState]   = useState("idle"); // idle | sending | sent | notfound
 
@@ -788,6 +797,20 @@ const ForgotPasswordModal = ({ onClose }) => {
                 <Btn variant="primary" onClick={onClose} style={{ flex: 1, justifyContent: "center" }}>Back to Sign In</Btn>
               </div>
             </div>
+          ) : role === "member" ? (
+            <div style={{ textAlign: "center" }}>
+              <div style={{ width: 56, height: 56, background: C.blueLight, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
+                <Icon name="phone" size={28} color={C.blue} />
+              </div>
+              <h3 style={{ color: C.green, margin: "0 0 8px", fontSize: 16 }}>Contact Your Librarian</h3>
+              <p style={{ color: C.gray600, fontSize: 13, lineHeight: 1.6, margin: "0 0 12px" }}>
+                Passwords are set by the librarian. Please visit the library or call us to reset your password.
+              </p>
+              <p style={{ color: C.gray900, fontWeight: 700, fontSize: 15, margin: "0 0 20px" }}>
+                +91 94454 11121
+              </p>
+              <Btn variant="primary" onClick={onClose} style={{ width: "100%", justifyContent: "center" }}>Back to Sign In</Btn>
+            </div>
           ) : (
             <>
               <p style={{ color: C.gray600, fontSize: 13, lineHeight: 1.6, margin: "0 0 20px" }}>
@@ -822,7 +845,7 @@ const ForgotPasswordModal = ({ onClose }) => {
 
 const LoginPage = ({ onLogin, onRegister, initialTab = "member" }) => {
   const [tab, setTab] = useState(initialTab);
-  const [email, setEmail] = useState("");
+  const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -833,10 +856,13 @@ const LoginPage = ({ onLogin, onRegister, initialTab = "member" }) => {
     setLoading(true);
     try {
       const role = tab === "librarian" ? "librarian" : tab === "admin" ? "admin" : "member";
-      const { data: users, error: dbErr } = await supabase.from("users").select("*").eq("email", email.trim().toLowerCase()).eq("role", role);
+      const isMember = role === "member";
+      const queryField = isMember ? "membership_id" : "email";
+      const queryValue = isMember ? identifier.trim().toUpperCase() : identifier.trim().toLowerCase();
+      const { data: users, error: dbErr } = await supabase.from("users").select("*").eq(queryField, queryValue).eq("role", role);
       if (dbErr) throw dbErr;
       const found = users?.[0];
-      if (!found) { setError("No account found with this email address."); return; }
+      if (!found) { setError(isMember ? "No account found with this Membership ID." : "No account found with this email address."); return; }
       if (!found.password) { setError("No password set. Contact the librarian."); return; }
       if (found.password !== password) { setError("Incorrect password."); return; }
       if (found.status !== "active") { setError("Your account is inactive. Contact admin."); return; }
@@ -867,7 +893,7 @@ const LoginPage = ({ onLogin, onRegister, initialTab = "member" }) => {
         {/* Role tabs */}
         <div style={{ display: "flex", borderBottom: `2px solid ${C.gray100}` }}>
           {tabs.map(t => (
-            <button key={t.id} onClick={() => { setTab(t.id); setError(""); setEmail(""); setPassword(""); }}
+            <button key={t.id} onClick={() => { setTab(t.id); setError(""); setIdentifier(""); setPassword(""); }}
               style={{ flex: 1, padding: "14px 8px", background: "none", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: "inherit", color: tab === t.id ? C.green : C.gray600, borderBottom: tab === t.id ? `2px solid ${C.green}` : "2px solid transparent", marginBottom: -2, transition: "color .15s" }}>
               {t.label}
             </button>
@@ -876,7 +902,10 @@ const LoginPage = ({ onLogin, onRegister, initialTab = "member" }) => {
 
         {/* Form */}
         <div style={{ padding: "24px 32px 28px" }}>
-          <Input label="Email" type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder={`${tab}@example.com`} icon="mail" required />
+          {tab === "member"
+            ? <Input label="Membership ID" type="text" value={identifier} onChange={e => setIdentifier(e.target.value)} placeholder="e.g. S1230101" icon="tag" required hint="Your membership card ID (e.g. S1230101)" />
+            : <Input label="Email" type="email" value={identifier} onChange={e => setIdentifier(e.target.value)} placeholder={`${tab}@example.com`} icon="mail" required />
+          }
 
           <div style={{ marginBottom: 14 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
@@ -912,7 +941,7 @@ const LoginPage = ({ onLogin, onRegister, initialTab = "member" }) => {
         </div>
       </div>
 
-      {showForgot && <ForgotPasswordModal onClose={() => setShowForgot(false)} />}
+      {showForgot && <ForgotPasswordModal onClose={() => setShowForgot(false)} role={tab} />}
     </div>
   );
 };
@@ -1596,6 +1625,7 @@ const CSV_DB_FIELDS = [
   { value: "address", label: "Address" },
   { value: "joined_at", label: "Date of Enrollment" },
   { value: "membership_type", label: "Membership Plan/Type" },
+  { value: "branch_id", label: "Branch" },
   { value: "payment_mode", label: "Payment Method" },
   { value: "upi_id", label: "UPI ID" },
   { value: "notes", label: "Comments/Notes" },
@@ -1616,10 +1646,53 @@ const AUTO_CSV_MAP = {
   "enrollment date": "joined_at", "join date": "joined_at", "joined": "joined_at",
   "membership plan": "membership_type", "plan": "membership_type",
   "membership type": "membership_type", "membership plan type": "membership_type",
+  "membership": "membership_type", "member type": "membership_type",
+  "member plan": "membership_type",
+  "branch": "branch_id", "branch id": "branch_id", "branch name": "branch_id",
+  "branch code": "branch_id", "location": "branch_id",
   "payment method": "payment_mode", "mode of payment": "payment_mode",
   "payment mode": "payment_mode", "payment": "payment_mode",
   "upi id": "upi_id", "upi": "upi_id",
   "comments": "notes", "notes": "notes", "remarks": "notes",
+};
+
+export const normalizeMembershipType = (value) => {
+  const raw = String(value || "").trim().toLowerCase();
+  const normalized = raw.replace(/[^a-z]+/g, " ").trim();
+  if (["annual", "monthly", "inhouse"].includes(normalized)) return normalized;
+  const inhousePattern = /^(inhouse|in house|in house reading|inhouse reading|inlibrary|in library|in library reading|walk in|walk in reading|reading only|reading)$/;
+  const monthlyPattern = /^(monthly|month|monthly plan|monthly fee|membership)$/;
+  const annualPattern = /^(annual|yearly|annual plan|annual fee|yearly fee|year)$/;
+  if (inhousePattern.test(normalized)) return "inhouse";
+  if (monthlyPattern.test(normalized)) return "monthly";
+  if (annualPattern.test(normalized)) return "annual";
+  return "annual";
+};
+
+const normalizeBranchValue = (value, branches = []) => {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const exactMatch = branches.find(b => String(b.id || "").trim().toLowerCase() === raw.toLowerCase());
+  if (exactMatch) return String(exactMatch.id);
+  const normalized = raw.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const nameMatch = branches.find(b => {
+    const name = String(b.name || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, " ");
+    return name === normalized || name.includes(normalized) || normalized.includes(name);
+  });
+  return nameMatch ? String(nameMatch.id) : null;
+};
+
+export const normalizeImportValue = (dbCol, value, branches = []) => {
+  if (dbCol === "membership_type") return normalizeMembershipType(value);
+  if (dbCol === "branch_id" || dbCol === "branch") return normalizeBranchValue(value, branches);
+  if (dbCol === "joined_at") {
+    const raw = String(value || "").trim();
+    if (!raw) return null;
+    const d = new Date(raw);
+    return isNaN(d) ? raw : d.toISOString().split("T")[0];
+  }
+  const cleaned = String(value || "").trim();
+  return cleaned || null;
 };
 
 const parseCSV = (text) => {
@@ -1697,7 +1770,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const showToast = (message, type = "success") => { setToast({ message, type }); };
 
   const emptyBook    = { title: "", author: "", genre: GENRES[0], year: "", isbn: "", copies: 1, language: "Tamil", cover: "", status: "active", catalogueNo: 0, colorCode: "", catalogueId: "", accessionNumber: "", ageGroup: "", category: "", tags: "", callNumberPrefix: "", callNumberSuffix: "" };
-  const emptyMember  = { name: "", email: "", phone: "", membershipType: "annual", status: "pending", password: "", plan: "", upiId: "" };
+  const emptyMember  = { name: "", email: "", phone: "", altPhone: "", enrollmentDate: "", childMemberName: "", childMemberDOB: "", guardianName: "", relationshipToMember: "", address: "", upiId: "", paymentMethod: "", registrationFees: "", offerType: "", refundableDeposit: "", branch: "", membershipType: "annual", plan: "", planDescription: "", status: "pending", password: "", comments: "" };
   const emptyLib     = { name: "", email: "", phone: "", branch: "Main", status: "active", password: "" };
   const emptyBranch  = { name: "", address: "", librarian: "" };
 
@@ -1958,7 +2031,25 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     const autoPassword = memberForm.password.trim() || memberForm.name.split(" ")[0].toLowerCase() + Math.floor(1000 + Math.random() * 9000);
     try {
       if (editMember) {
-        const updateData = { full_name: memberForm.name, email: memberForm.email, phone: memberForm.phone, membership_type: memberForm.membershipType, status: memberForm.status, upi_id: memberForm.upiId || null };
+        const updateData = {
+          full_name: memberForm.name, email: memberForm.email, phone: memberForm.phone,
+          alternate_phone_number: memberForm.altPhone || null,
+          enrollment_date: memberForm.enrollmentDate || null,
+          child_member_name: memberForm.childMemberName || null,
+          child_member_dateofbirth: memberForm.childMemberDOB || null,
+          parent_guardian_name: memberForm.guardianName || null,
+          relationship_to_the_member: memberForm.relationshipToMember || null,
+          address: memberForm.address || null,
+          upi_id: memberForm.upiId || null,
+          payment_method: memberForm.paymentMethod || null,
+          onetime_registration_fees: memberForm.registrationFees !== "" ? parseFloat(memberForm.registrationFees) : null,
+          offer_type: memberForm.offerType || null,
+          refundable_deposit: memberForm.refundableDeposit !== "" ? parseFloat(memberForm.refundableDeposit) : null,
+          branch_id: memberForm.branch || null,
+          membership_type: memberForm.membershipType, status: memberForm.status,
+          membership_plan_description: memberForm.planDescription || null,
+          comments: memberForm.comments || null,
+        };
         if (memberForm.password.trim()) updateData.password = memberForm.password.trim();
         if (memberForm.plan) updateData.plan = memberForm.plan;
         const { data, error } = await supabase.from("users").update(updateData).eq("id", editMember.id).select().single();
@@ -1968,9 +2059,23 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       } else {
         const insertData = {
           full_name: memberForm.name, email: memberForm.email, phone: memberForm.phone,
+          alternate_phone_number: memberForm.altPhone || null,
+          enrollment_date: memberForm.enrollmentDate || null,
+          child_member_name: memberForm.childMemberName || null,
+          child_member_dateofbirth: memberForm.childMemberDOB || null,
+          parent_guardian_name: memberForm.guardianName || null,
+          relationship_to_the_member: memberForm.relationshipToMember || null,
+          address: memberForm.address || null,
+          upi_id: memberForm.upiId || null,
+          payment_method: memberForm.paymentMethod || null,
+          onetime_registration_fees: memberForm.registrationFees !== "" ? parseFloat(memberForm.registrationFees) : null,
+          offer_type: memberForm.offerType || null,
+          refundable_deposit: memberForm.refundableDeposit !== "" ? parseFloat(memberForm.refundableDeposit) : null,
+          branch_id: memberForm.branch || null,
           password: autoPassword, role: "member", status: memberForm.status,
           membership_type: memberForm.membershipType, fees_due: 0,
-          upi_id: memberForm.upiId || null,
+          membership_plan_description: memberForm.planDescription || null,
+          comments: memberForm.comments || null,
         };
         if (memberForm.plan) insertData.plan = memberForm.plan;
         const { data, error } = await supabase.from("users").insert(insertData).select().single();
@@ -2008,17 +2113,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         Object.entries(importMapping).forEach(([csvCol, dbCol]) => {
           if (!dbCol) return;
           const val = (row[csvCol] || "").trim();
-          if (dbCol === "membership_type") {
-            const n = val.toLowerCase();
-            rec[dbCol] = ["annual", "monthly", "inhouse"].includes(n) ? n : (val || "annual");
-          } else if (dbCol === "joined_at") {
-            if (val) {
-              const d = new Date(val);
-              rec[dbCol] = isNaN(d) ? val : d.toISOString().split("T")[0];
-            }
-          } else {
-            rec[dbCol] = val || null;
-          }
+          rec[dbCol] = normalizeImportValue(dbCol, val, branches);
         });
         return rec;
       }).filter(r => r.full_name);
@@ -2143,7 +2238,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     setPenaltyShowQR(false);
   };
 
-  const openEditMember = (m) => { setEditMember(m); setMemberForm({ name: m.name, email: m.email, phone: m.phone || "", membershipType: m.membershipType || "annual", status: m.status, password: m.password || "", plan: m.plan || "", upiId: m.upiId || "" }); setShowMemberForm(true); };
+  const openEditMember = (m) => { setEditMember(m); setMemberForm({ name: m.name, email: m.email, phone: m.phone || "", altPhone: m.altPhone || "", enrollmentDate: m.enrollmentDate || "", childMemberName: m.childMemberName || "", childMemberDOB: m.childMemberDOB || "", guardianName: m.guardianName || "", relationshipToMember: m.relationshipToMember || "", address: m.address || "", upiId: m.upiId || "", paymentMethod: m.paymentMethod || "", registrationFees: m.registrationFees || "", offerType: m.offerType || "", refundableDeposit: m.refundableDeposit || "", branch: m.branch || "", membershipType: m.membershipType || "annual", plan: m.plan || "", planDescription: m.planDescription || "", status: m.status, password: m.password || "", comments: m.comments || "" }); setShowMemberForm(true); };
 
   // ── LIBRARIAN CRUD ──
   const saveLib = () => {
@@ -3610,25 +3705,89 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
       )}
 
       {/* Member form */}
-      <Modal open={showMemberForm} onClose={() => { setShowMemberForm(false); setEditMember(null); }} title={editMember ? "Edit Member" : "Add New Member"} width={460}>
-        <Input label="Full Name" value={memberForm.name} onChange={e => setMemberForm({ ...memberForm, name: e.target.value })} placeholder="Member's full name" icon="user" required />
-        <Input label="Email" type="email" value={memberForm.email} onChange={e => setMemberForm({ ...memberForm, email: e.target.value })} placeholder="email@example.com" icon="mail" required />
-        <Input label="Phone" value={memberForm.phone} onChange={e => setMemberForm({ ...memberForm, phone: e.target.value })} placeholder="+91 98765 43210" icon="phone" />
-        <Input label="UPI ID" value={memberForm.upiId} onChange={e => setMemberForm({ ...memberForm, upiId: e.target.value })} placeholder="name@upi or 9876543210@paytm" hint="Used to pre-fill payment link for renewal reminders" />
-        <Input label="Password" type="password" value={memberForm.password} onChange={e => setMemberForm({ ...memberForm, password: e.target.value })} placeholder="Set login password" icon="lock" hint="Leave blank to keep existing password" />
-        <Select label="Membership Plan" value={memberForm.plan} onChange={e => setMemberForm({ ...memberForm, plan: e.target.value })} options={[
-          { value: "", label: "— Select a plan —" },
-          ...(settings.plans || DEFAULT_PLANS).map(p => ({ value: p.id, label: p.inhouseOnly ? `${p.name} (walk-in reading · no monthly fee)` : `${p.name} (up to ${p.borrowLimit} books · ₹${p.cost}/month)` })),
-        ]} />
-        <Select label="Membership Type" value={memberForm.membershipType} onChange={e => setMemberForm({ ...memberForm, membershipType: e.target.value })} options={[
-          { value: "annual",  label: "Annual" },
-          { value: "monthly", label: "Monthly" },
-        ]} />
-        <Select label="Status" value={memberForm.status} onChange={e => setMemberForm({ ...memberForm, status: e.target.value })} options={[
-          { value: "active",    label: "Active"    },
-          { value: "pending",   label: "Pending"   },
-          { value: "suspended", label: "Suspended" },
-        ]} />
+      <Modal open={showMemberForm} onClose={() => { setShowMemberForm(false); setEditMember(null); }} title={editMember ? "Edit Member" : "Add New Member"} width={560}>
+        {/* ── Member Info ── */}
+        <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>Member Info</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+          <Input label="Full Name" value={memberForm.name} onChange={e => setMemberForm({ ...memberForm, name: e.target.value })} placeholder="Member's full name" icon="user" required />
+          <Input label="Enrollment Date" type="date" value={memberForm.enrollmentDate} onChange={e => setMemberForm({ ...memberForm, enrollmentDate: e.target.value })} />
+          <Input label="Email" type="email" value={memberForm.email} onChange={e => setMemberForm({ ...memberForm, email: e.target.value })} placeholder="email@example.com" icon="mail" required />
+          <Input label="Phone" value={memberForm.phone} onChange={e => setMemberForm({ ...memberForm, phone: e.target.value })} placeholder="+91 98765 43210" icon="phone" />
+          <Input label="Alternate Phone" value={memberForm.altPhone} onChange={e => setMemberForm({ ...memberForm, altPhone: e.target.value })} placeholder="+91 98765 43210" icon="phone" />
+          <Input label="UPI ID" value={memberForm.upiId} onChange={e => setMemberForm({ ...memberForm, upiId: e.target.value })} placeholder="name@upi or 9876543210@paytm" hint="Used for renewal payment links" />
+        </div>
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 5, textTransform: "uppercase", letterSpacing: .5 }}>Address</label>
+          <textarea value={memberForm.address} onChange={e => setMemberForm({ ...memberForm, address: e.target.value })} placeholder="Full address" rows={2}
+            style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", resize: "vertical", outline: "none" }}
+            onFocus={e => e.target.style.borderColor = C.green} onBlur={e => e.target.style.borderColor = C.gray300} />
+        </div>
+
+        {/* ── Child Member ── */}
+        <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Child Member (if applicable)</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+          <Input label="Child Member Name" value={memberForm.childMemberName} onChange={e => setMemberForm({ ...memberForm, childMemberName: e.target.value })} placeholder="Child's full name" />
+          <Input label="Child Date of Birth" type="date" value={memberForm.childMemberDOB} onChange={e => setMemberForm({ ...memberForm, childMemberDOB: e.target.value })} />
+          <Input label="Parent / Guardian Name" value={memberForm.guardianName} onChange={e => setMemberForm({ ...memberForm, guardianName: e.target.value })} placeholder="Guardian's name" />
+          <Input label="Relationship to Member" value={memberForm.relationshipToMember} onChange={e => setMemberForm({ ...memberForm, relationshipToMember: e.target.value })} placeholder="e.g. Father, Mother" />
+        </div>
+
+        {/* ── Payment ── */}
+        <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Payment</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+          <Select label="Payment Method" value={memberForm.paymentMethod} onChange={e => setMemberForm({ ...memberForm, paymentMethod: e.target.value })} options={[
+            { value: "", label: "— Select —" },
+            { value: "cash", label: "Cash" },
+            { value: "upi", label: "UPI" },
+            { value: "bank_transfer", label: "Bank Transfer" },
+            { value: "card", label: "Card" },
+            { value: "cheque", label: "Cheque" },
+          ]} />
+          <Input label="Offer Type" value={memberForm.offerType} onChange={e => setMemberForm({ ...memberForm, offerType: e.target.value })} placeholder="e.g. Referral, Festival" />
+          <Input label="One-time Registration Fee (₹)" type="number" value={memberForm.registrationFees} onChange={e => setMemberForm({ ...memberForm, registrationFees: e.target.value })} placeholder="0" />
+          <Input label="Refundable Deposit (₹)" type="number" value={memberForm.refundableDeposit} onChange={e => setMemberForm({ ...memberForm, refundableDeposit: e.target.value })} placeholder="0" />
+        </div>
+
+        {/* ── Membership ── */}
+        <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Membership</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+          <Select label="Membership Plan" value={memberForm.plan} onChange={e => setMemberForm({ ...memberForm, plan: e.target.value })} options={[
+            { value: "", label: "— Select a plan —" },
+            ...(settings.plans || DEFAULT_PLANS).map(p => ({ value: p.id, label: p.inhouseOnly ? `${p.name} (walk-in)` : `${p.name} (${p.borrowLimit} books · ₹${p.cost}/mo)` })),
+          ]} />
+          <Select label="Membership Type" value={memberForm.membershipType} onChange={e => setMemberForm({ ...memberForm, membershipType: e.target.value })} options={[
+            { value: "annual",  label: "Annual" },
+            { value: "monthly", label: "Monthly" },
+          ]} />
+        </div>
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 5, textTransform: "uppercase", letterSpacing: .5 }}>Membership Plan Description</label>
+          <textarea value={memberForm.planDescription} onChange={e => setMemberForm({ ...memberForm, planDescription: e.target.value })} placeholder="Optional description of the plan" rows={2}
+            style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", resize: "vertical", outline: "none" }}
+            onFocus={e => e.target.style.borderColor = C.green} onBlur={e => e.target.style.borderColor = C.gray300} />
+        </div>
+
+        {/* ── Admin ── */}
+        <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Admin</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+          <Select label="Branch" value={memberForm.branch} onChange={e => setMemberForm({ ...memberForm, branch: e.target.value })} options={[
+            { value: "", label: "— Select branch —" },
+            ...branches.map(b => ({ value: b.id, label: b.name })),
+          ]} />
+          <Select label="Status" value={memberForm.status} onChange={e => setMemberForm({ ...memberForm, status: e.target.value })} options={[
+            { value: "active",    label: "Active"    },
+            { value: "pending",   label: "Pending"   },
+            { value: "suspended", label: "Suspended" },
+          ]} />
+          <Input label="Password" type="password" value={memberForm.password} onChange={e => setMemberForm({ ...memberForm, password: e.target.value })} placeholder="Set login password" icon="lock" hint="Leave blank to auto-generate" />
+        </div>
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 5, textTransform: "uppercase", letterSpacing: .5 }}>Comments</label>
+          <textarea value={memberForm.comments} onChange={e => setMemberForm({ ...memberForm, comments: e.target.value })} placeholder="Any additional notes or remarks" rows={2}
+            style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", resize: "vertical", outline: "none" }}
+            onFocus={e => e.target.style.borderColor = C.green} onBlur={e => e.target.style.borderColor = C.gray300} />
+        </div>
+
         <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
           <Btn onClick={saveMember} variant="primary">{editMember ? "Save Changes" : "Create Member"}</Btn>
           <Btn onClick={() => { setShowMemberForm(false); setEditMember(null); }} variant="ghost">Cancel</Btn>
