@@ -3756,9 +3756,9 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
             ...(settings.plans || DEFAULT_PLANS).map(p => ({ value: p.id, label: p.inhouseOnly ? `${p.name} (walk-in)` : `${p.name} (${p.borrowLimit} books · ₹${p.cost}/mo)` })),
           ]} />
           <Select label="Membership Type" value={memberForm.membershipType} onChange={e => setMemberForm({ ...memberForm, membershipType: e.target.value })} options={[
-            { value: "annual",   label: "Annual" },
             { value: "monthly",  label: "Monthly" },
             { value: "inhouse",  label: "In-Library (Inhouse)" },
+            { value: "annual",   label: "Annual" },
           ]} />
         </div>
         <div style={{ marginBottom: 14 }}>
