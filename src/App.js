@@ -1770,7 +1770,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const showToast = (message, type = "success") => { setToast({ message, type }); };
 
   const emptyBook    = { title: "", author: "", genre: GENRES[0], year: "", isbn: "", copies: 1, language: "Tamil", cover: "", status: "active", catalogueNo: 0, colorCode: "", catalogueId: "", accessionNumber: "", ageGroup: "", category: "", tags: "", callNumberPrefix: "", callNumberSuffix: "" };
-  const emptyMember  = { name: "", email: "", phone: "", altPhone: "", enrollmentDate: "", childMemberName: "", childMemberDOB: "", guardianName: "", relationshipToMember: "", address: "", upiId: "", paymentMethod: "", registrationFees: "", offerType: "", refundableDeposit: "", branch: "", membershipType: "annual", plan: "", planDescription: "", status: "pending", password: "", comments: "" };
+  const emptyMember  = { name: "", email: "", phone: "", altPhone: "", enrollmentDate: "", childMemberName: "", childMemberDOB: "", guardianName: "", relationshipToMember: "", address: "", upiId: "", paymentMethod: "", registrationFees: "", offerType: "", refundableDeposit: "", branch: "", membershipType: "monthly", plan: "", planDescription: "", status: "pending", password: "", comments: "" };
   const emptyLib     = { name: "", email: "", phone: "", branch: "Main", status: "active", password: "" };
   const emptyBranch  = { name: "", address: "", librarian: "" };
 
