@@ -90,6 +90,12 @@ const dbToCopy = (c) => ({
   condition: c.condition || "good",
   status: c.status || "available",
 });
+const dbToMemberStatus = (s) => ({
+  id: s.id, memberId: s.member_id || "", memberName: s.member_name || "",
+  status: s.status || "", membershipPlan: s.membership_plan || "",
+  lastPaidMonth: s.last_paid_month || "",
+  booksWithMember: s.number_of_books_with_member || "",
+});
 const dbToPayment = (p) => ({
   id: p.id, date: p.date || "",
   memberId: p.member_id || "",
@@ -1759,10 +1765,9 @@ const autoMapCSVHeaders = (headers) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // LIBRARIAN / ADMIN DASHBOARD
 // ─────────────────────────────────────────────────────────────────────────────
-const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, setLibrarians, settings, onSettings, transactions, setTransactions, requests, setRequests, bookCopies, setBookCopies, waitlist, setWaitlist, payments, isAdmin, branches, setBranches }) => {
+const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, setLibrarians, settings, onSettings, transactions, setTransactions, requests, setRequests, bookCopies, setBookCopies, waitlist, setWaitlist, payments, memberStatuses, isAdmin, branches, setBranches }) => {
   const [tab, setTab] = useState("books");
   const [paymentSearch, setPaymentSearch] = useState("");
-  const [paymentMonthFilter, setPaymentMonthFilter] = useState("");
   const [renewalFilter, setRenewalFilter] = useState(null); // null | "overdue" | "pending"
   const [memberFilter, setMemberFilter] = useState(null); // null | "pending"
   const [showBookForm, setShowBookForm] = useState(false);
@@ -1850,25 +1855,29 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const pendingRequestsCount = (requests || []).filter(r => r.status === "pending").length;
 
   // ── Renewal helpers ──
-  const getMemberRenewalDue = (m) => {
-    if (!m.plan) return null; // no plan, no renewal tracking
-    const base = m.planRenewedAt || m.joined;
-    if (!base) return null;
-    const d = new Date(base);
-    d.setMonth(d.getMonth() + 1);
-    return d.toISOString().split("T")[0];
-  };
+  // Base = status table: last_paid_month before the current month (or never paid),
+  // excluding closed accounts and In Library Reading members.
   const daysDiff = (dateStr) => {
     const diff = new Date(dateStr) - new Date(today());
     return Math.ceil(diff / 86400000);
   };
-  const renewalDueMembers = (members || []).filter(m => {
-    if (m.status !== "active" || !m.plan) return false;
-    const pl = (settings.plans || DEFAULT_PLANS).find(p => p.id === m.plan);
-    return pl && (pl.cost || 0) > 0; // Inhouse Reading (₹0/month) excluded from renewal tracking
-  }).map(m => ({
-    ...m, renewalDue: getMemberRenewalDue(m),
-  })).filter(m => m.renewalDue && daysDiff(m.renewalDue) <= 7)
+  const EXCLUDED_RENEWAL_STATUS = /closed|in library reading/i;
+  const renewalCurrentMonthStart = new Date();
+  renewalCurrentMonthStart.setDate(1);
+  renewalCurrentMonthStart.setHours(0, 0, 0, 0);
+  const renewalDueMembers = (memberStatuses || [])
+    .filter(s => s.status && !EXCLUDED_RENEWAL_STATUS.test(s.status))
+    .map(s => {
+      const member = members.find(m => m.membershipId === s.memberId);
+      if (!member || member.status !== "active") return null;
+      const paidDate = s.lastPaidMonth ? new Date(s.lastPaidMonth) : null;
+      const validPaidDate = paidDate && !isNaN(paidDate) ? paidDate : null;
+      if (validPaidDate && validPaidDate >= renewalCurrentMonthStart) return null; // already paid for this month
+      const dueBase = validPaidDate ? new Date(validPaidDate) : new Date(member.joined || today());
+      dueBase.setMonth(dueBase.getMonth() + 1);
+      return { ...member, renewalDue: dueBase.toISOString().split("T")[0] };
+    })
+    .filter(Boolean)
     .sort((a, b) => new Date(a.renewalDue) - new Date(b.renewalDue));
   const renewalOverdue  = renewalDueMembers.filter(m => daysDiff(m.renewalDue) < 0);
   const renewalDueSoon  = renewalDueMembers.filter(m => daysDiff(m.renewalDue) >= 0);
@@ -1882,7 +1891,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     { id: "loans",       label: "Active Loans", icon: "eye"      },
     { id: "waitlist",    label: `Waitlist${waitlistActiveCount > 0 ? ` (${waitlistActiveCount})` : ""}`, icon: "eye" },
     { id: "renewals",    label: `Renewals${renewalCount > 0 ? ` (${renewalCount})` : ""}`, icon: "money" },
-    { id: "payments",    label: "Payments",     icon: "money"    },
+    { id: "payments",    label: "Payments Received", icon: "money" },
     { id: "customize",   label: "Customize",    icon: "settings" },
     { id: "fees",        label: "Fee Settings", icon: "money"    },
     ...(isAdmin ? [
@@ -3241,12 +3250,13 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
         );
       })()}
 
-      {/* ══ PAYMENTS HISTORY TAB ══ */}
+      {/* ══ PAYMENTS RECEIVED TAB ══ */}
       {tab === "payments" && (() => {
-        const monthOptions = Array.from(new Set((payments || []).map(p => p.date ? p.date.slice(0, 7) : null).filter(Boolean))).sort().reverse();
         const q = paymentSearch.trim().toLowerCase();
-        const filtered = (payments || []).filter(p => {
-          if (paymentMonthFilter && p.date?.slice(0, 7) !== paymentMonthFilter) return false;
+        const thisMonthKey = new Date().toISOString().slice(0, 7);
+        const paymentsThisMonth = (payments || []).filter(p => p.date?.slice(0, 7) === thisMonthKey)
+          .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+        const filtered = paymentsThisMonth.filter(p => {
           if (!q) return true;
           const member = members.find(m => m.membershipId === p.memberId);
           const haystack = [
@@ -3256,38 +3266,32 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
           ].filter(Boolean).join(" ").toLowerCase();
           return haystack.includes(q);
         });
-        const totalFiltered = filtered.reduce((s, p) => s + p.amountPaid, 0);
-        const thisMonthKey = new Date().toISOString().slice(0, 7);
-        const thisMonthCollected = (payments || []).filter(p => p.date?.slice(0, 7) === thisMonthKey).reduce((s, p) => s + p.amountPaid, 0);
+        const thisMonthCollected = paymentsThisMonth.reduce((s, p) => s + p.amountPaid, 0);
+        const thisMonthPayerCount = new Set(paymentsThisMonth.map(p => p.memberId)).size;
 
         return (
           <div>
-            <h2 style={{ margin: "0 0 6px", color: C.green, fontSize: 16, fontWeight: 700 }}>Payments History</h2>
-            <p style={{ color: C.gray600, fontSize: 13, margin: "0 0 20px" }}>Track all membership fee payments, renewals, and late fine collections.</p>
+            <h2 style={{ margin: "0 0 6px", color: C.green, fontSize: 16, fontWeight: 700 }}>Payments Received</h2>
+            <p style={{ color: C.gray600, fontSize: 13, margin: "0 0 20px" }}>Members who have made a payment this month.</p>
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14, marginBottom: 20 }}>
-              <StatCard label="Total Payments" value={(payments || []).length.toLocaleString()} icon="money" color={C.green} />
-              <StatCard label="This Month Collected" value={`₹${thisMonthCollected.toLocaleString()}`} icon="check" color={C.greenMid} />
-              <StatCard label={paymentMonthFilter || q ? "Filtered Total" : "All-Time Collected"} value={`₹${totalFiltered.toLocaleString()}`} icon="money" color={C.blue} />
+              <StatCard label="Payments This Month" value={paymentsThisMonth.length} icon="money" color={C.green} />
+              <StatCard label="Members Paid" value={thisMonthPayerCount} icon="users" color={C.blue} />
+              <StatCard label="Total Collected" value={`₹${thisMonthCollected.toLocaleString()}`} icon="check" color={C.greenMid} />
             </div>
 
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 6, alignItems: "flex-start" }}>
-              <div style={{ flex: 1, minWidth: 220 }}>
-                <Input placeholder="Search member, plan, method, month (e.g. Jun-26, 2 Books)…" value={paymentSearch} onChange={e => setPaymentSearch(e.target.value)} />
-              </div>
-              <div style={{ minWidth: 160 }}>
-                <Select value={paymentMonthFilter} onChange={e => setPaymentMonthFilter(e.target.value)} options={[{ value: "", label: "All Months" }, ...monthOptions.map(m => ({ value: m, label: m }))]} />
-              </div>
+            <div style={{ marginBottom: 6 }}>
+              <Input placeholder="Search member, plan, method (e.g. 2 Books)…" value={paymentSearch} onChange={e => setPaymentSearch(e.target.value)} />
             </div>
 
-            {(payments || []).length === 0 ? (
+            {paymentsThisMonth.length === 0 ? (
               <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 16, padding: "48px 24px", textAlign: "center" }}>
                 <div style={{ width: 64, height: 64, background: C.green + "18", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
                   <Icon name="money" size={30} color={C.green} />
                 </div>
-                <div style={{ fontSize: 18, fontWeight: 800, color: C.green, marginBottom: 8 }}>No Payments Yet</div>
+                <div style={{ fontSize: 18, fontWeight: 800, color: C.green, marginBottom: 8 }}>No Payments Yet This Month</div>
                 <div style={{ fontSize: 14, color: C.gray600, maxWidth: 380, margin: "0 auto", lineHeight: 1.6 }}>
-                  Payment records will appear here once they're collected and synced from the payments table.
+                  Payments recorded this month will show up here.
                 </div>
               </div>
             ) : (
@@ -4396,6 +4400,7 @@ export default function App() {
   const [bookCopies,   setBookCopies]   = useState([]);
   const [waitlist,     setWaitlist]     = useState([]);
   const [payments,     setPayments]     = useState([]);
+  const [memberStatuses, setMemberStatuses] = useState([]);
   const [settings,     setSettings]     = useState(() => {
     try {
       const saved = localStorage.getItem("arivagam_settings");
@@ -4405,28 +4410,45 @@ export default function App() {
 
   // Load live data from Supabase on mount
   useEffect(() => {
+    // Supabase/PostgREST caps each response at 1000 rows by default — page through
+    // tables that can exceed that (books, book_copies, payments) to fetch everything.
+    const fetchAllRows = async (buildQuery, pageSize = 1000) => {
+      let all = [];
+      let from = 0;
+      for (;;) {
+        const { data, error } = await buildQuery().range(from, from + pageSize - 1);
+        if (error) throw error;
+        if (!data || data.length === 0) break;
+        all = all.concat(data);
+        if (data.length < pageSize) break;
+        from += pageSize;
+      }
+      return all;
+    };
     const load = async () => {
       try {
-        const [booksRes, usersRes, txnsRes, reqsRes, feeRes, copiesRes, waitRes, paymentsRes] = await Promise.all([
-          supabase.from("books").select("*").eq("status", "active").order("title"),
+        const [usersRes, txnsRes, reqsRes, feeRes, waitRes, statusRes, booksData, copiesData, paymentsData] = await Promise.all([
           supabase.from("users").select("*").order("child_member_name"),
           supabase.from("transactions").select("*, users!member_id(child_member_name), books!book_id(title), book_copies!copy_id(accession_number)"),
           supabase.from("borrow_requests").select("*").order("created_at", { ascending: false }),
           supabase.from("fee_settings").select("*").limit(1).maybeSingle(),
-          supabase.from("book_copies").select("*").order("accession_number"),
           supabase.from("book_waitlist").select("*").order("position"),
-          supabase.from("payments").select("*").order("date", { ascending: false }),
+          supabase.from("status").select("*"),
+          fetchAllRows(() => supabase.from("books").select("*").eq("status", "active").order("title").order("id")),
+          fetchAllRows(() => supabase.from("book_copies").select("*").order("accession_number").order("id")),
+          fetchAllRows(() => supabase.from("payments").select("*").order("date", { ascending: false }).order("id")),
         ]);
-        if (booksRes.data?.length)  setBooks(booksRes.data.map(dbToBook));
+        if (booksData.length)       setBooks(booksData.map(dbToBook));
         if (usersRes.data?.length) {
           setMembers(usersRes.data.filter(u => u.role === "member").map(dbToUser));
           setLibrarians(usersRes.data.filter(u => u.role === "librarian").map(dbToUser));
         }
         if (txnsRes.data?.length)   setTransactions(txnsRes.data.map(dbToTxn));
         if (reqsRes.data)           setRequests(reqsRes.data.map(dbToRequest));
-        if (copiesRes.data?.length) setBookCopies(copiesRes.data.map(dbToCopy));
+        if (copiesData.length)      setBookCopies(copiesData.map(dbToCopy));
         if (waitRes.data?.length)   setWaitlist(waitRes.data.map(dbToWaitlist));
-        if (paymentsRes.data)       setPayments(paymentsRes.data.map(dbToPayment));
+        if (paymentsData.length)    setPayments(paymentsData.map(dbToPayment));
+        if (statusRes.data)         setMemberStatuses(statusRes.data.map(dbToMemberStatus));
         if (feeRes.data) {
           // Load full settings from DB if available (saved via saveSettings)
           if (feeRes.data.settings_json) {
@@ -4640,7 +4662,7 @@ export default function App() {
           requests={requests} setRequests={setRequests}
           bookCopies={bookCopies} setBookCopies={setBookCopies}
           waitlist={waitlist} setWaitlist={setWaitlist}
-          payments={payments}
+          payments={payments} memberStatuses={memberStatuses}
           settings={settings} onSettings={setSettings}
           isAdmin={false}
         />
@@ -4656,7 +4678,7 @@ export default function App() {
           requests={requests} setRequests={setRequests}
           bookCopies={bookCopies} setBookCopies={setBookCopies}
           waitlist={waitlist} setWaitlist={setWaitlist}
-          payments={payments}
+          payments={payments} memberStatuses={memberStatuses}
           settings={settings} onSettings={setSettings}
           isAdmin={true}
         />
