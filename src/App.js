@@ -3109,7 +3109,12 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
 
       {/* ══ RENEWALS TAB ══ */}
       {tab === "renewals" && (() => {
-        const planMap = Object.fromEntries((settings.plans || DEFAULT_PLANS).map(p => [p.id, p]));
+        const planList = settings.plans || DEFAULT_PLANS;
+        const planMap = Object.fromEntries(planList.map(p => [p.id, p]));
+        const planByName = Object.fromEntries(planList.map(p => [p.name.toLowerCase(), p]));
+        // Users table stores membership_plan as either the plan id (newer members) or the plan name text
+        // (legacy/imported members) — resolve by name when the id lookup misses so Renewals always shows a plan.
+        const resolvePlan = (m) => planMap[m.plan] || planByName[(m.plan || "").toLowerCase()] || null;
         const libraryUpi = localSettings.library?.upiId || settings.library?.upiId || "";
         const makeUpiLink = (plan, member) => {
           if (!libraryUpi || !plan) return null;
@@ -3128,7 +3133,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
           return `https://wa.me/${phone.startsWith("91") ? phone : "91" + phone}?text=${encodeURIComponent(msg)}`;
         };
         const renderRow = (m, i) => {
-          const plan = planMap[m.plan];
+          const plan = resolvePlan(m);
           const diff = daysDiff(m.renewalDue);
           const overdue = diff < 0;
           const waLink = makeWhatsAppLink(m, plan);
@@ -3202,7 +3207,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
               </div>
               <div style={{ background: C.blueLight, border: `1px solid ${C.blue}`, borderRadius: 12, padding: "16px 20px", textAlign: "center" }}>
                 <div style={{ fontSize: 28, fontWeight: 800, color: C.blue }}>
-                  ₹{renewalDueMembers.reduce((s, m) => s + (planMap[m.plan]?.cost || 0), 0).toLocaleString()}
+                  ₹{renewalDueMembers.reduce((s, m) => s + (resolvePlan(m)?.cost || 0), 0).toLocaleString()}
                 </div>
                 <div style={{ fontSize: 12, color: C.blue, fontWeight: 700, marginTop: 4 }}>Pending Revenue</div>
               </div>
