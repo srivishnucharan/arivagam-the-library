@@ -90,6 +90,18 @@ const dbToCopy = (c) => ({
   condition: c.condition || "good",
   status: c.status || "available",
 });
+const dbToPayment = (p) => ({
+  id: p.id, date: p.date || "",
+  memberId: p.member_id || "",
+  childMemberName: p.child_member_name || "",
+  bookPlan: p.book_plan || "",
+  amountPaid: parseFloat(p.amount_paid) || 0,
+  paymentMethod: p.payment_method || "",
+  fromAccount: p.from_account || "",
+  nextFeeMonth: p.next_fee_month || "",
+  panNo: p.pan_no || "",
+  paymentType: p.payment_type || "",
+});
 
 // ARIVAGAM LIBRARY MANAGEMENT SYSTEM — v2.0
 // Create React App compatible · All-in-one App.js
@@ -147,6 +159,9 @@ const langAbbr   = (l) => (l || "").slice(0, 1).toUpperCase();
 const colorAbbr  = (c) => { const f = COLOR_CODES.find(x => x.code === c); return f ? f.code : ""; };
 
 const DEFAULT_CATID_FIELDS = { catalogueNo: true, genre: true, language: true, colorCode: true };
+
+// Fallback password for members imported without one set (e.g. bulk CSV/DB loads) — lets them log in until the librarian sets a real password.
+const DEFAULT_MEMBER_PASSWORD = "User@123";
 
 // ─── DEFAULT SETTINGS ─────────────────────────────────────────────────────────
 const DEFAULT_PLANS = [
@@ -863,8 +878,15 @@ const LoginPage = ({ onLogin, onRegister, initialTab = "member" }) => {
       if (dbErr) throw dbErr;
       const found = users?.[0];
       if (!found) { setError(isMember ? "No account found with this Membership ID." : "No account found with this email address."); return; }
-      if (!found.password) { setError("No password set. Contact the librarian."); return; }
-      if (found.password !== password) { setError("Incorrect password."); return; }
+      if (!found.password) {
+        if (!isMember || password !== DEFAULT_MEMBER_PASSWORD) {
+          setError(isMember ? `Incorrect password. New members can sign in with the default password "${DEFAULT_MEMBER_PASSWORD}".` : "No password set. Contact the librarian.");
+          return;
+        }
+      } else if (found.password !== password) {
+        setError("Incorrect password.");
+        return;
+      }
       if (found.status !== "active") { setError("Your account is inactive. Contact admin."); return; }
       onLogin(dbToUser(found));
     } catch (err) {
@@ -922,6 +944,11 @@ const LoginPage = ({ onLogin, onRegister, initialTab = "member" }) => {
                 onFocus={e => e.target.style.borderColor = C.green}
                 onBlur={e => e.target.style.borderColor = C.gray300} />
             </div>
+            {tab === "member" && (
+              <p style={{ fontSize: 11, color: C.gray600, margin: "4px 0 0" }}>
+                First time signing in? Use the default password <strong>{DEFAULT_MEMBER_PASSWORD}</strong>.
+              </p>
+            )}
           </div>
 
           {error && <div style={{ background: C.redLight, color: C.red, borderRadius: 8, padding: "10px 14px", fontSize: 13, marginBottom: 16, fontWeight: 600 }}>{error}</div>}
@@ -1732,8 +1759,10 @@ const autoMapCSVHeaders = (headers) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // LIBRARIAN / ADMIN DASHBOARD
 // ─────────────────────────────────────────────────────────────────────────────
-const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, setLibrarians, settings, onSettings, transactions, setTransactions, requests, setRequests, bookCopies, setBookCopies, waitlist, setWaitlist, isAdmin, branches, setBranches }) => {
+const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, setLibrarians, settings, onSettings, transactions, setTransactions, requests, setRequests, bookCopies, setBookCopies, waitlist, setWaitlist, payments, isAdmin, branches, setBranches }) => {
   const [tab, setTab] = useState("books");
+  const [paymentSearch, setPaymentSearch] = useState("");
+  const [paymentMonthFilter, setPaymentMonthFilter] = useState("");
   const [renewalFilter, setRenewalFilter] = useState(null); // null | "overdue" | "pending"
   const [memberFilter, setMemberFilter] = useState(null); // null | "pending"
   const [showBookForm, setShowBookForm] = useState(false);
@@ -3213,21 +3242,83 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
       })()}
 
       {/* ══ PAYMENTS HISTORY TAB ══ */}
-      {tab === "payments" && (
-        <div>
-          <h2 style={{ margin: "0 0 6px", color: C.green, fontSize: 16, fontWeight: 700 }}>Payments History</h2>
-          <p style={{ color: C.gray600, fontSize: 13, margin: "0 0 24px" }}>Track all membership fee payments, renewals, and late fine collections.</p>
-          <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 16, padding: "48px 24px", textAlign: "center" }}>
-            <div style={{ width: 64, height: 64, background: C.green + "18", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
-              <Icon name="money" size={30} color={C.green} />
+      {tab === "payments" && (() => {
+        const monthOptions = Array.from(new Set((payments || []).map(p => p.date ? p.date.slice(0, 7) : null).filter(Boolean))).sort().reverse();
+        const q = paymentSearch.trim().toLowerCase();
+        const filtered = (payments || []).filter(p => {
+          if (paymentMonthFilter && p.date?.slice(0, 7) !== paymentMonthFilter) return false;
+          if (!q) return true;
+          const member = members.find(m => m.membershipId === p.memberId);
+          return p.memberId.toLowerCase().includes(q)
+            || (member?.name || "").toLowerCase().includes(q)
+            || (p.childMemberName || "").toLowerCase().includes(q);
+        });
+        const totalFiltered = filtered.reduce((s, p) => s + p.amountPaid, 0);
+        const thisMonthKey = new Date().toISOString().slice(0, 7);
+        const thisMonthCollected = (payments || []).filter(p => p.date?.slice(0, 7) === thisMonthKey).reduce((s, p) => s + p.amountPaid, 0);
+
+        return (
+          <div>
+            <h2 style={{ margin: "0 0 6px", color: C.green, fontSize: 16, fontWeight: 700 }}>Payments History</h2>
+            <p style={{ color: C.gray600, fontSize: 13, margin: "0 0 20px" }}>Track all membership fee payments, renewals, and late fine collections.</p>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14, marginBottom: 20 }}>
+              <StatCard label="Total Payments" value={(payments || []).length.toLocaleString()} icon="money" color={C.green} />
+              <StatCard label="This Month Collected" value={`₹${thisMonthCollected.toLocaleString()}`} icon="check" color={C.greenMid} />
+              <StatCard label={paymentMonthFilter || q ? "Filtered Total" : "All-Time Collected"} value={`₹${totalFiltered.toLocaleString()}`} icon="money" color={C.blue} />
             </div>
-            <div style={{ fontSize: 18, fontWeight: 800, color: C.green, marginBottom: 8 }}>Coming Soon</div>
-            <div style={{ fontSize: 14, color: C.gray600, maxWidth: 380, margin: "0 auto", lineHeight: 1.6 }}>
-              Full payment history — membership fees, renewals, and fine collections — will be tracked here. Each transaction will show the member, amount, date, and payment method.
+
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 6, alignItems: "flex-start" }}>
+              <div style={{ flex: 1, minWidth: 220 }}>
+                <Input placeholder="Search by member name or ID…" value={paymentSearch} onChange={e => setPaymentSearch(e.target.value)} />
+              </div>
+              <div style={{ minWidth: 160 }}>
+                <Select value={paymentMonthFilter} onChange={e => setPaymentMonthFilter(e.target.value)} options={[{ value: "", label: "All Months" }, ...monthOptions.map(m => ({ value: m, label: m }))]} />
+              </div>
             </div>
+
+            {(payments || []).length === 0 ? (
+              <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 16, padding: "48px 24px", textAlign: "center" }}>
+                <div style={{ width: 64, height: 64, background: C.green + "18", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
+                  <Icon name="money" size={30} color={C.green} />
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 800, color: C.green, marginBottom: 8 }}>No Payments Yet</div>
+                <div style={{ fontSize: 14, color: C.gray600, maxWidth: 380, margin: "0 auto", lineHeight: 1.6 }}>
+                  Payment records will appear here once they're collected and synced from the payments table.
+                </div>
+              </div>
+            ) : (
+              <div className="revenue-tbl-scroll">
+                <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 12, overflow: "hidden" }}>
+                  <div className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "0.9fr 1.5fr 1fr 0.9fr 1fr 1fr 1fr", padding: "10px 18px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase" }}>
+                    <span>Date</span><span>Member</span><span>Plan</span><span>Amount</span><span>Method</span><span>Type</span><span>Next Fee Month</span>
+                  </div>
+                  {filtered.map((p, i) => {
+                    const member = members.find(m => m.membershipId === p.memberId);
+                    return (
+                      <div key={p.id} className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "0.9fr 1.5fr 1fr 0.9fr 1fr 1fr 1fr", padding: "12px 18px", borderTop: `1px solid ${C.gray100}`, alignItems: "center", background: i % 2 === 0 ? C.white : C.gray50 }}>
+                        <span style={{ fontSize: 13, color: C.gray700 }}>{p.date || "—"}</span>
+                        <div>
+                          <div style={{ fontWeight: 700, color: C.green, fontSize: 13 }}>{member?.name || p.childMemberName || "—"}</div>
+                          <div style={{ fontSize: 11, color: C.gray600 }}>{p.memberId}</div>
+                        </div>
+                        <span style={{ fontSize: 13, color: C.gray700 }}>{p.bookPlan || "—"}</span>
+                        <span style={{ fontSize: 14, fontWeight: 700, color: C.greenMid }}>₹{p.amountPaid.toLocaleString()}</span>
+                        <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentMethod || "—"}</span>
+                        <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentType || "—"}</span>
+                        <span style={{ fontSize: 13, color: C.gray700 }}>{p.nextFeeMonth || "—"}</span>
+                      </div>
+                    );
+                  })}
+                  {filtered.length === 0 && (
+                    <div style={{ padding: "24px 18px", textAlign: "center", color: C.gray600, fontSize: 13 }}>No payments match your search.</div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ══ CUSTOMIZE TAB ══ */}
       {tab === "customize" && (
@@ -4301,6 +4392,7 @@ export default function App() {
   const [requests,     setRequests]     = useState([]);
   const [bookCopies,   setBookCopies]   = useState([]);
   const [waitlist,     setWaitlist]     = useState([]);
+  const [payments,     setPayments]     = useState([]);
   const [settings,     setSettings]     = useState(() => {
     try {
       const saved = localStorage.getItem("arivagam_settings");
@@ -4312,7 +4404,7 @@ export default function App() {
   useEffect(() => {
     const load = async () => {
       try {
-        const [booksRes, usersRes, txnsRes, reqsRes, feeRes, copiesRes, waitRes] = await Promise.all([
+        const [booksRes, usersRes, txnsRes, reqsRes, feeRes, copiesRes, waitRes, paymentsRes] = await Promise.all([
           supabase.from("books").select("*").eq("status", "active").order("title"),
           supabase.from("users").select("*").order("full_name"),
           supabase.from("transactions").select("*, users!member_id(full_name), books!book_id(title), book_copies!copy_id(accession_number)"),
@@ -4320,6 +4412,7 @@ export default function App() {
           supabase.from("fee_settings").select("*").limit(1).maybeSingle(),
           supabase.from("book_copies").select("*").order("accession_number"),
           supabase.from("book_waitlist").select("*").order("position"),
+          supabase.from("payments").select("*").order("date", { ascending: false }),
         ]);
         if (booksRes.data?.length)  setBooks(booksRes.data.map(dbToBook));
         if (usersRes.data?.length) {
@@ -4330,6 +4423,7 @@ export default function App() {
         if (reqsRes.data)           setRequests(reqsRes.data.map(dbToRequest));
         if (copiesRes.data?.length) setBookCopies(copiesRes.data.map(dbToCopy));
         if (waitRes.data?.length)   setWaitlist(waitRes.data.map(dbToWaitlist));
+        if (paymentsRes.data)       setPayments(paymentsRes.data.map(dbToPayment));
         if (feeRes.data) {
           // Load full settings from DB if available (saved via saveSettings)
           if (feeRes.data.settings_json) {
@@ -4543,6 +4637,7 @@ export default function App() {
           requests={requests} setRequests={setRequests}
           bookCopies={bookCopies} setBookCopies={setBookCopies}
           waitlist={waitlist} setWaitlist={setWaitlist}
+          payments={payments}
           settings={settings} onSettings={setSettings}
           isAdmin={false}
         />
@@ -4558,6 +4653,7 @@ export default function App() {
           requests={requests} setRequests={setRequests}
           bookCopies={bookCopies} setBookCopies={setBookCopies}
           waitlist={waitlist} setWaitlist={setWaitlist}
+          payments={payments}
           settings={settings} onSettings={setSettings}
           isAdmin={true}
         />
