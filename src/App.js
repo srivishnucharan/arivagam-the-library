@@ -3249,9 +3249,12 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
           if (paymentMonthFilter && p.date?.slice(0, 7) !== paymentMonthFilter) return false;
           if (!q) return true;
           const member = members.find(m => m.membershipId === p.memberId);
-          return p.memberId.toLowerCase().includes(q)
-            || (member?.name || "").toLowerCase().includes(q)
-            || (p.childMemberName || "").toLowerCase().includes(q);
+          const haystack = [
+            p.memberId, member?.name, p.childMemberName,
+            p.bookPlan, p.paymentMethod, p.paymentType,
+            p.nextFeeMonth, p.fromAccount, p.panNo, p.date,
+          ].filter(Boolean).join(" ").toLowerCase();
+          return haystack.includes(q);
         });
         const totalFiltered = filtered.reduce((s, p) => s + p.amountPaid, 0);
         const thisMonthKey = new Date().toISOString().slice(0, 7);
@@ -3270,7 +3273,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
 
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 6, alignItems: "flex-start" }}>
               <div style={{ flex: 1, minWidth: 220 }}>
-                <Input placeholder="Search by member name or ID…" value={paymentSearch} onChange={e => setPaymentSearch(e.target.value)} />
+                <Input placeholder="Search member, plan, method, month (e.g. Jun-26, 2 Books)…" value={paymentSearch} onChange={e => setPaymentSearch(e.target.value)} />
               </div>
               <div style={{ minWidth: 160 }}>
                 <Select value={paymentMonthFilter} onChange={e => setPaymentMonthFilter(e.target.value)} options={[{ value: "", label: "All Months" }, ...monthOptions.map(m => ({ value: m, label: m }))]} />
