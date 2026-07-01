@@ -36,13 +36,13 @@ const bookToDB = (b) => ({
 });
 const dbToUser = (u) => ({
   id: u.id, membershipId: u.membership_id || "",
-  name: u.full_name, email: u.email, phone: u.phone || "",
+  name: u.child_member_name, email: u.email_id, phone: u.phone_number || "",
   role: u.role, status: u.status, membershipType: u.membership_type || "annual",
   fees: parseFloat(u.fees_due) || 0,
   joined: u.joined_at ? u.joined_at.split("T")[0] : new Date().toISOString().split("T")[0],
   enrollmentDate: u.enrollment_date ? u.enrollment_date.split("T")[0] : "",
   password: u.password || "", branch: u.branch_id || "",
-  plan: u.plan || null,
+  plan: u.membership_plan || null,
   planDescription: u.membership_plan_description || "",
   planRenewedAt: u.plan_renewed_at || null,
   upiId: u.upi_id || "",
@@ -61,7 +61,7 @@ const dbToUser = (u) => ({
 });
 const dbToTxn = (t) => ({
   id: t.id, memberId: t.member_id,
-  memberName: t.users?.full_name || t.member_name || "",
+  memberName: t.users?.child_member_name || t.member_name || "",
   bookId: t.book_id, bookTitle: t.books?.title || t.book_title || "",
   borrowDate: t.borrowed_at ? t.borrowed_at.split("T")[0] : t.borrow_date,
   dueDate: t.due_date ? t.due_date.split("T")[0] : null,
@@ -762,7 +762,7 @@ const ForgotPasswordModal = ({ onClose, role = "member" }) => {
   const handleSend = async () => {
     setFpState("sending");
     try {
-      const { data } = await supabase.from("users").select("id").eq("email", fpEmail.trim().toLowerCase());
+      const { data } = await supabase.from("users").select("id").eq("email_id", fpEmail.trim().toLowerCase());
       setFpState(data?.length > 0 ? "sent" : "notfound");
     } catch {
       setFpState("notfound");
@@ -872,7 +872,7 @@ const LoginPage = ({ onLogin, onRegister, initialTab = "member" }) => {
     try {
       const role = tab === "librarian" ? "librarian" : tab === "admin" ? "admin" : "member";
       const isMember = role === "member";
-      const queryField = isMember ? "membership_id" : "email";
+      const queryField = isMember ? "membership_id" : "email_id";
       const queryValue = isMember ? identifier.trim().toUpperCase() : identifier.trim().toLowerCase();
       const { data: users, error: dbErr } = await supabase.from("users").select("*").eq(queryField, queryValue).eq("role", role);
       if (dbErr) throw dbErr;
@@ -1003,14 +1003,14 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings }) => {
     setErrors({});
     try {
       const { data, error } = await supabase.from("users").insert({
-        full_name: form.name.trim(),
-        email: form.email.trim().toLowerCase(),
-        phone: form.phone.trim(),
+        child_member_name: form.name.trim(),
+        email_id: form.email.trim().toLowerCase(),
+        phone_number: form.phone.trim(),
         address: form.address.trim(),
         password: form.password,
         role: "member",
         status: "pending",
-        plan: selectedPlanId,
+        membership_plan: selectedPlanId,
         membership_type: selectedPlan?.inhouseOnly ? "inhouse" : "monthly",
         fees_due: 0,
       }).select().single();
@@ -1645,29 +1645,29 @@ const MemberDashboard = ({ user, books, transactions, requests, waitlist, settin
 const CSV_DB_FIELDS = [
   { value: "", label: "— Skip —" },
   { value: "membership_id", label: "Member ID" },
-  { value: "full_name", label: "Child/Member Name" },
-  { value: "guardian_name", label: "Parent/Guardian Name" },
-  { value: "phone", label: "Phone Number" },
-  { value: "email", label: "Email ID" },
+  { value: "child_member_name", label: "Child/Member Name" },
+  { value: "parent_guardian_name", label: "Parent/Guardian Name" },
+  { value: "phone_number", label: "Phone Number" },
+  { value: "email_id", label: "Email ID" },
   { value: "address", label: "Address" },
   { value: "joined_at", label: "Date of Enrollment" },
   { value: "membership_type", label: "Membership Plan/Type" },
   { value: "branch_id", label: "Branch" },
-  { value: "payment_mode", label: "Payment Method" },
+  { value: "payment_method", label: "Payment Method" },
   { value: "upi_id", label: "UPI ID" },
-  { value: "notes", label: "Comments/Notes" },
+  { value: "comments", label: "Comments/Notes" },
 ];
 
 const AUTO_CSV_MAP = {
   "member id": "membership_id", "membership id": "membership_id",
   "membership no": "membership_id", "member no": "membership_id",
-  "child (member) name": "full_name", "child name": "full_name",
-  "member name": "full_name", "name": "full_name", "full name": "full_name",
-  "parent's/guardian's name": "guardian_name", "parent's / guardian's name": "guardian_name",
-  "parent/guardian name": "guardian_name", "guardian name": "guardian_name",
-  "parent name": "guardian_name", "guardian": "guardian_name",
-  "phone number": "phone", "phone": "phone", "mobile": "phone", "mobile number": "phone",
-  "email id": "email", "email": "email", "email address": "email", "e-mail": "email",
+  "child (member) name": "child_member_name", "child name": "child_member_name",
+  "member name": "child_member_name", "name": "child_member_name", "full name": "child_member_name",
+  "parent's/guardian's name": "parent_guardian_name", "parent's / guardian's name": "parent_guardian_name",
+  "parent/guardian name": "parent_guardian_name", "guardian name": "parent_guardian_name",
+  "parent name": "parent_guardian_name", "guardian": "parent_guardian_name",
+  "phone number": "phone_number", "phone": "phone_number", "mobile": "phone_number", "mobile number": "phone_number",
+  "email id": "email_id", "email": "email_id", "email address": "email_id", "e-mail": "email_id",
   "address": "address",
   "date of enrollment": "joined_at", "date of enrolment": "joined_at",
   "enrollment date": "joined_at", "join date": "joined_at", "joined": "joined_at",
@@ -1677,10 +1677,10 @@ const AUTO_CSV_MAP = {
   "member plan": "membership_type",
   "branch": "branch_id", "branch id": "branch_id", "branch name": "branch_id",
   "branch code": "branch_id", "location": "branch_id",
-  "payment method": "payment_mode", "mode of payment": "payment_mode",
-  "payment mode": "payment_mode", "payment": "payment_mode",
+  "payment method": "payment_method", "mode of payment": "payment_method",
+  "payment mode": "payment_method", "payment": "payment_method",
   "upi id": "upi_id", "upi": "upi_id",
-  "comments": "notes", "notes": "notes", "remarks": "notes",
+  "comments": "comments", "notes": "comments", "remarks": "comments",
 };
 
 export const normalizeMembershipType = (value) => {
@@ -2061,10 +2061,10 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     try {
       if (editMember) {
         const updateData = {
-          full_name: memberForm.name, email: memberForm.email, phone: memberForm.phone,
+          child_member_name: memberForm.name || memberForm.childMemberName || null,
+          email_id: memberForm.email, phone_number: memberForm.phone,
           alternate_phone_number: memberForm.altPhone || null,
           enrollment_date: memberForm.enrollmentDate || null,
-          child_member_name: memberForm.childMemberName || null,
           child_member_dateofbirth: memberForm.childMemberDOB || null,
           parent_guardian_name: memberForm.guardianName || null,
           relationship_to_the_member: memberForm.relationshipToMember || null,
@@ -2080,17 +2080,17 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           comments: memberForm.comments || null,
         };
         if (memberForm.password.trim()) updateData.password = memberForm.password.trim();
-        if (memberForm.plan) updateData.plan = memberForm.plan;
+        if (memberForm.plan) updateData.membership_plan = memberForm.plan;
         const { data, error } = await supabase.from("users").update(updateData).eq("id", editMember.id).select().single();
         if (error) throw error;
         setMembers(members.map(m => m.id === editMember.id ? dbToUser(data) : m));
         showToast(`Member "${memberForm.name}" updated.`);
       } else {
         const insertData = {
-          full_name: memberForm.name, email: memberForm.email, phone: memberForm.phone,
+          child_member_name: memberForm.name || memberForm.childMemberName || null,
+          email_id: memberForm.email, phone_number: memberForm.phone,
           alternate_phone_number: memberForm.altPhone || null,
           enrollment_date: memberForm.enrollmentDate || null,
-          child_member_name: memberForm.childMemberName || null,
           child_member_dateofbirth: memberForm.childMemberDOB || null,
           parent_guardian_name: memberForm.guardianName || null,
           relationship_to_the_member: memberForm.relationshipToMember || null,
@@ -2106,7 +2106,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           membership_plan_description: memberForm.planDescription || null,
           comments: memberForm.comments || null,
         };
-        if (memberForm.plan) insertData.plan = memberForm.plan;
+        if (memberForm.plan) insertData.membership_plan = memberForm.plan;
         const { data, error } = await supabase.from("users").insert(insertData).select().single();
         if (error) throw error;
         setMembers([...members, dbToUser(data)]);
@@ -2131,7 +2131,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     setImportResult(null);
     try {
       const records = importRows.map(row => {
-        const nameCol = Object.keys(importMapping).find(k => importMapping[k] === "full_name");
+        const nameCol = Object.keys(importMapping).find(k => importMapping[k] === "child_member_name");
         const baseName = nameCol ? (row[nameCol] || "").trim() : "";
         const rec = {
           role: "member",
@@ -2145,7 +2145,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           rec[dbCol] = normalizeImportValue(dbCol, val, branches);
         });
         return rec;
-      }).filter(r => r.full_name);
+      }).filter(r => r.child_member_name);
 
       if (!records.length) {
         showToast("No valid rows found. Make sure 'Child/Member Name' column is mapped.", "error");
@@ -2191,7 +2191,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     const newMembershipId = genMembershipId(joinDate, sameMonthCount);
     try {
       const updateData = { status: "active", membership_id: newMembershipId };
-      if (planId) updateData.plan = planId;
+      if (planId) updateData.membership_plan = planId;
       const { data, error } = await supabase.from("users").update(updateData).eq("id", memberId).select().single();
       if (error) throw error;
       const mapped = dbToUser(data);
@@ -4320,10 +4320,10 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
               <div style={{ fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 6 }}>PREVIEW (first 3 rows)</div>
               <div style={{ maxHeight: 120, overflowY: "auto", border: `1px solid ${C.gray100}`, borderRadius: 8, marginBottom: 16, fontSize: 12 }}>
                 {importRows.slice(0, 3).map((row, ri) => {
-                  const nameCol = Object.keys(importMapping).find(k => importMapping[k] === "full_name");
-                  const guardianCol = Object.keys(importMapping).find(k => importMapping[k] === "guardian_name");
-                  const phoneCol = Object.keys(importMapping).find(k => importMapping[k] === "phone");
-                  const emailCol = Object.keys(importMapping).find(k => importMapping[k] === "email");
+                  const nameCol = Object.keys(importMapping).find(k => importMapping[k] === "child_member_name");
+                  const guardianCol = Object.keys(importMapping).find(k => importMapping[k] === "parent_guardian_name");
+                  const phoneCol = Object.keys(importMapping).find(k => importMapping[k] === "phone_number");
+                  const emailCol = Object.keys(importMapping).find(k => importMapping[k] === "email_id");
                   return (
                     <div key={ri} style={{ padding: "8px 12px", borderTop: ri > 0 ? `1px solid ${C.gray100}` : "none", background: ri % 2 === 0 ? C.white : C.gray50 }}>
                       <span style={{ fontWeight: 700, color: C.green }}>{nameCol ? row[nameCol] : "(no name)"}</span>
@@ -4406,8 +4406,8 @@ export default function App() {
       try {
         const [booksRes, usersRes, txnsRes, reqsRes, feeRes, copiesRes, waitRes, paymentsRes] = await Promise.all([
           supabase.from("books").select("*").eq("status", "active").order("title"),
-          supabase.from("users").select("*").order("full_name"),
-          supabase.from("transactions").select("*, users!member_id(full_name), books!book_id(title), book_copies!copy_id(accession_number)"),
+          supabase.from("users").select("*").order("child_member_name"),
+          supabase.from("transactions").select("*, users!member_id(child_member_name), books!book_id(title), book_copies!copy_id(accession_number)"),
           supabase.from("borrow_requests").select("*").order("created_at", { ascending: false }),
           supabase.from("fee_settings").select("*").limit(1).maybeSingle(),
           supabase.from("book_copies").select("*").order("accession_number"),
