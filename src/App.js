@@ -277,6 +277,7 @@ const Icon = ({ name, size = 18, color = "currentColor" }) => {
     settings:    <svg {...p}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>,
     branch:      <svg {...p}><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 01-9 9"/></svg>,
     money:       <svg {...p}><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>,
+    rupee:       <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="none"><text x="12" y="18" textAnchor="middle" fontSize="18" fontWeight="700" fill={color} fontFamily="inherit">₹</text></svg>,
     home:        <svg {...p}><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>,
     eye:         <svg {...p}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
     logout:      <svg {...p}><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>,
@@ -1765,9 +1766,11 @@ const autoMapCSVHeaders = (headers) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // LIBRARIAN / ADMIN DASHBOARD
 // ─────────────────────────────────────────────────────────────────────────────
-const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, setLibrarians, settings, onSettings, transactions, setTransactions, requests, setRequests, bookCopies, setBookCopies, waitlist, setWaitlist, payments, memberStatuses, isAdmin, branches, setBranches }) => {
+const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, setLibrarians, settings, onSettings, transactions, setTransactions, requests, setRequests, bookCopies, setBookCopies, waitlist, setWaitlist, payments, memberStatuses, setMemberStatuses, isAdmin, branches, setBranches }) => {
   const [tab, setTab] = useState("books");
   const [paymentSearch, setPaymentSearch] = useState("");
+  const [paymentsSubTab, setPaymentsSubTab] = useState("received"); // "received" | "history"
+  const [paymentMonthFilter, setPaymentMonthFilter] = useState("");
   const [renewalFilter, setRenewalFilter] = useState(null); // null | "overdue" | "pending"
   const [memberFilter, setMemberFilter] = useState(null); // null | "pending"
   const [showBookForm, setShowBookForm] = useState(false);
@@ -1785,6 +1788,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const [activatePlanId, setActivatePlanId] = useState("");
   const [renewModal, setRenewModal] = useState(null); // { member, plan }
   const [renewExtras, setRenewExtras] = useState({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
+  const [collectMode, setCollectMode] = useState("total"); // "total" | "partial" — how last_paid_month gets set on renew
+  const [manualPaidMonth, setManualPaidMonth] = useState(""); // "YYYY-MM", used when collectMode === "partial"
   const [penaltyModal, setPenaltyModal] = useState(null); // { txn, member, lateAmt }
   const [penaltyExtras, setPenaltyExtras] = useState({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
   const [penaltyShowQR, setPenaltyShowQR] = useState(false);
@@ -1854,6 +1859,14 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
 
   const pendingRequestsCount = (requests || []).filter(r => r.status === "pending").length;
 
+  // ── Plan resolution ──
+  // membership_plan on Users is either a plan id (members added/edited via the form) or a
+  // plan name string (legacy/imported members) — resolve both ways so lookups never miss.
+  const planList = settings.plans || DEFAULT_PLANS;
+  const planMap = Object.fromEntries(planList.map(p => [p.id, p]));
+  const planByName = Object.fromEntries(planList.map(p => [p.name.toLowerCase(), p]));
+  const resolvePlan = (planKey) => planMap[planKey] || planByName[(planKey || "").toLowerCase()] || null;
+
   // ── Renewal helpers ──
   // Base = status table: last_paid_month before the current month (or never paid),
   // excluding closed accounts and In Library Reading members.
@@ -1861,6 +1874,9 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     const diff = new Date(dateStr) - new Date(today());
     return Math.ceil(diff / 86400000);
   };
+  const monthDiff = (from, to) => (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth());
+  // Matches the "MMM YYYY" text format already used in the status table's last_paid_month column (e.g. "Oct 2023")
+  const monthYearLabel = (year, monthIndex) => new Date(year, monthIndex, 1).toLocaleString("en-US", { month: "short", year: "numeric" });
   const EXCLUDED_RENEWAL_STATUS = /closed|in library reading/i;
   const renewalCurrentMonthStart = new Date();
   renewalCurrentMonthStart.setDate(1);
@@ -1875,7 +1891,13 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       if (validPaidDate && validPaidDate >= renewalCurrentMonthStart) return null; // already paid for this month
       const dueBase = validPaidDate ? new Date(validPaidDate) : new Date(member.joined || today());
       dueBase.setMonth(dueBase.getMonth() + 1);
-      return { ...member, renewalDue: dueBase.toISOString().split("T")[0] };
+      // Months strictly before this one that are still unpaid = arrears; this month's charge is separate.
+      const monthlyCost = resolvePlan(member.plan)?.cost || 0;
+      const overdueMonths = Math.max(0, monthDiff(dueBase, renewalCurrentMonthStart));
+      const overdueAmount = overdueMonths * monthlyCost;
+      const dueThisMonthAmount = monthlyCost;
+      const totalOutstanding = overdueAmount + dueThisMonthAmount;
+      return { ...member, renewalDue: dueBase.toISOString().split("T")[0], statusLastPaidMonth: s.lastPaidMonth, overdueMonths, overdueAmount, dueThisMonthAmount, totalOutstanding };
     })
     .filter(Boolean)
     .sort((a, b) => new Date(a.renewalDue) - new Date(b.renewalDue));
@@ -1890,8 +1912,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     { id: "requests",    label: `Requests${pendingRequestsCount > 0 ? ` (${pendingRequestsCount})` : ""}`, icon: "book" },
     { id: "loans",       label: "Active Loans", icon: "eye"      },
     { id: "waitlist",    label: `Waitlist${waitlistActiveCount > 0 ? ` (${waitlistActiveCount})` : ""}`, icon: "eye" },
-    { id: "renewals",    label: `Renewals${renewalCount > 0 ? ` (${renewalCount})` : ""}`, icon: "money" },
-    { id: "payments",    label: "Payments Received", icon: "money" },
+    { id: "renewals",    label: `Renewals${renewalCount > 0 ? ` (${renewalCount})` : ""}`, icon: "rupee" },
+    { id: "payments",    label: "Payments",     icon: "rupee"    },
     { id: "customize",   label: "Customize",    icon: "settings" },
     { id: "fees",        label: "Fee Settings", icon: "money"    },
     ...(isAdmin ? [
@@ -2231,6 +2253,23 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       const { error } = await supabase.from("users").update({ plan_renewed_at: renewedDate, renewal_requested_at: null, fees: newFees }).eq("id", memberId);
       if (error) throw error;
       setMembers(prev => prev.map(m => m.id === memberId ? { ...m, planRenewedAt: renewedDate, renewalRequestedAt: null, fees: newFees } : m));
+      // Advance last_paid_month on the status table so Renewals reflects this payment
+      if (extras.membershipId && extras.lastPaidMonthText) {
+        const { data: updated, error: statusErr } = await supabase.from("status")
+          .update({ last_paid_month: extras.lastPaidMonthText })
+          .eq("member_id", extras.membershipId)
+          .select();
+        if (statusErr) throw statusErr;
+        if (updated && updated.length > 0) {
+          setMemberStatuses?.(prev => prev.map(s => s.memberId === extras.membershipId ? { ...s, lastPaidMonth: extras.lastPaidMonthText } : s));
+        } else {
+          // No status row yet (e.g. member added directly in-app) — create one so future renewals track it
+          const { data: inserted, error: insertErr } = await supabase.from("status")
+            .insert({ member_id: extras.membershipId, member_name: extras.memberName || "", status: "Active", last_paid_month: extras.lastPaidMonthText })
+            .select();
+          if (!insertErr && inserted?.[0]) setMemberStatuses?.(prev => [...prev, dbToMemberStatus(inserted[0])]);
+        }
+      }
       showToast("Membership renewed successfully!");
     } catch {
       setMembers(prev => prev.map(m => m.id === memberId ? { ...m, planRenewedAt: renewedDate, renewalRequestedAt: null, fees: newFees } : m));
@@ -2238,6 +2277,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     }
     setRenewModal(null);
     setRenewExtras({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
+    setCollectMode("total");
+    setManualPaidMonth("");
   };
 
   const resetPenaltyExtras = () => setPenaltyExtras({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
@@ -2573,7 +2614,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           )}
           <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 12, overflow: "hidden" }}>
             {members.filter(m => !memberFilter || m.status === memberFilter).map((m, i) => {
-              const plan = m.plan ? (settings.plans || DEFAULT_PLANS).find(p => p.id === m.plan) : null;
+              const plan = resolvePlan(m.plan);
               return (
                 <div key={m.id} onClick={() => setSelectedMember(m)} style={{ display: "flex", gap: 12, padding: "14px 18px", borderTop: i > 0 ? `1px solid ${C.gray100}` : "none", alignItems: "center", flexWrap: "wrap", background: m.status === "pending" ? C.goldLight + "55" : i % 2 === 0 ? C.white : C.gray50, cursor: "pointer", transition: "background .12s" }}
                   onMouseEnter={e => e.currentTarget.style.background = C.green + "0a"}
@@ -2598,7 +2639,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
                         <div style={{ fontSize: 11, color: "#7D4E1A", marginTop: 2 }}>Review &amp; Renew</div>
                       </div>
                       <button
-                        onClick={() => { const p = (settings.plans || DEFAULT_PLANS).find(pl => pl.id === m.plan); setRenewModal({ member: m, plan: p }); }}
+                        onClick={() => setRenewModal({ member: m, plan: resolvePlan(m.plan) })}
                         style={{ background: "#E67E22", color: "#fff", border: "none", borderRadius: 6, padding: "5px 10px", fontSize: 11, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
                         Renew Now
                       </button>
@@ -2624,7 +2665,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       {/* ══ MEMBER DETAIL VIEW ══ */}
       {tab === "members" && selectedMember && (() => {
         const m = members.find(x => x.id === selectedMember.id) || selectedMember;
-        const plan = m.plan ? (settings.plans || DEFAULT_PLANS).find(p => p.id === m.plan) : null;
+        const plan = resolvePlan(m.plan);
         const mTxns = transactions.filter(t => t.memberId === m.id);
         const activeLoans = mTxns.filter(t => !t.returnDate);
         const history = mTxns.filter(t => t.returnDate);
@@ -3109,19 +3150,14 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
 
       {/* ══ RENEWALS TAB ══ */}
       {tab === "renewals" && (() => {
-        const planList = settings.plans || DEFAULT_PLANS;
-        const planMap = Object.fromEntries(planList.map(p => [p.id, p]));
-        const planByName = Object.fromEntries(planList.map(p => [p.name.toLowerCase(), p]));
-        // Users table stores membership_plan as either the plan id (newer members) or the plan name text
-        // (legacy/imported members) — resolve by name when the id lookup misses so Renewals always shows a plan.
-        const resolvePlan = (m) => planMap[m.plan] || planByName[(m.plan || "").toLowerCase()] || null;
         const libraryUpi = localSettings.library?.upiId || settings.library?.upiId || "";
         const makeUpiLink = (plan, member) => {
           if (!libraryUpi || !plan) return null;
+          const amount = member.totalOutstanding || plan.cost;
           const dueDate = new Date(member.renewalDue || today());
           const monthLabel = dueDate.toLocaleString("en-IN", { month: "short" }) + "-" + String(dueDate.getFullYear()).slice(2);
           const note = encodeURIComponent(`${member.membershipId || member.id}-${monthLabel}`);
-          return `upi://pay?pa=${encodeURIComponent(libraryUpi)}&am=${plan.cost}&tn=${note}&cu=INR`;
+          return `upi://pay?pa=${encodeURIComponent(libraryUpi)}&am=${amount}&tn=${note}&cu=INR`;
         };
         const makeWhatsAppLink = (m, plan) => {
           const phone = (m.phone || "").replace(/\D/g, "");
@@ -3129,11 +3165,14 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
           const upiLink = makeUpiLink(plan, m);
           const dueDate = new Date(m.renewalDue || today());
           const monthLabel = dueDate.toLocaleString("en-IN", { month: "short" }) + " " + dueDate.getFullYear();
-          const msg = `Hi ${m.name.split(" ")[0]}, your *${plan?.name || "membership"}* at *${localSettings.library?.name || "the library"}* is due for renewal on *${m.renewalDue}* (${monthLabel}).\n\nAmount: *₹${plan?.cost}/month*\n\n${upiLink ? `Pay now 👇\n${upiLink}\n\n` : ""}Pay using the UPI id shared to avoid Late fees and Notify the Librarian after payment. Thanks!! 🙏`;
+          const amountLine = m.overdueMonths > 0
+            ? `Overdue: ₹${m.overdueAmount.toLocaleString()} (${m.overdueMonths} month${m.overdueMonths > 1 ? "s" : ""}) + This month: ₹${m.dueThisMonthAmount.toLocaleString()}\n*Total Due: ₹${m.totalOutstanding.toLocaleString()}*`
+            : `Amount: *₹${m.dueThisMonthAmount}/month*`;
+          const msg = `Hi ${m.name.split(" ")[0]}, your *${plan?.name || "membership"}* at *${localSettings.library?.name || "the library"}* is due for renewal on *${m.renewalDue}* (${monthLabel}).\n\n${amountLine}\n\n${upiLink ? `Pay now 👇\n${upiLink}\n\n` : ""}Pay using the UPI id shared to avoid Late fees and Notify the Librarian after payment. Thanks!! 🙏`;
           return `https://wa.me/${phone.startsWith("91") ? phone : "91" + phone}?text=${encodeURIComponent(msg)}`;
         };
         const renderRow = (m, i) => {
-          const plan = resolvePlan(m);
+          const plan = resolvePlan(m.plan);
           const diff = daysDiff(m.renewalDue);
           const overdue = diff < 0;
           const waLink = makeWhatsAppLink(m, plan);
@@ -3166,7 +3205,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                   </button>
                 </div>
               )}
-              <div style={{ textAlign: "right", minWidth: 110 }}>
+              <div style={{ textAlign: "right", minWidth: 160 }}>
                 <div style={{ fontSize: 12, color: C.gray600 }}>Due: <strong>{m.renewalDue}</strong></div>
                 {overdue
                   ? <div style={{ fontSize: 12, color: C.red, fontWeight: 700 }}>{Math.abs(diff)}d overdue</div>
@@ -3174,6 +3213,14 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                     ? <div style={{ fontSize: 12, color: "#E67E22", fontWeight: 700 }}>Due Today</div>
                     : <div style={{ fontSize: 12, color: "#E67E22", fontWeight: 600 }}>In {diff} day{diff !== 1 ? "s" : ""}</div>
                 }
+                {m.overdueMonths > 0 && (
+                  <div style={{ fontSize: 11, color: C.red, marginTop: 3 }}>
+                    ₹{m.overdueAmount.toLocaleString()} overdue + ₹{m.dueThisMonthAmount.toLocaleString()} this month
+                  </div>
+                )}
+                <div style={{ fontSize: 13, fontWeight: 800, color: C.gray900, marginTop: 2 }}>
+                  Total ₹{m.totalOutstanding.toLocaleString()}
+                </div>
               </div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 {waLink && (
@@ -3183,7 +3230,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                     WhatsApp
                   </a>
                 )}
-                <Btn size="sm" variant="primary" icon="money" onClick={() => setRenewModal({ member: m, plan })}>
+                <Btn size="sm" variant="primary" icon="rupee" onClick={() => setRenewModal({ member: m, plan })}>
                   Collect &amp; Renew
                 </Btn>
               </div>
@@ -3207,7 +3254,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
               </div>
               <div style={{ background: C.blueLight, border: `1px solid ${C.blue}`, borderRadius: 12, padding: "16px 20px", textAlign: "center" }}>
                 <div style={{ fontSize: 28, fontWeight: 800, color: C.blue }}>
-                  ₹{renewalDueMembers.reduce((s, m) => s + (resolvePlan(m)?.cost || 0), 0).toLocaleString()}
+                  ₹{renewalDueMembers.reduce((s, m) => s + m.totalOutstanding, 0).toLocaleString()}
                 </div>
                 <div style={{ fontSize: 12, color: C.blue, fontWeight: 700, marginTop: 4 }}>Pending Revenue</div>
               </div>
@@ -3255,79 +3302,116 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
         );
       })()}
 
-      {/* ══ PAYMENTS RECEIVED TAB ══ */}
+      {/* ══ PAYMENTS TAB ══ */}
       {tab === "payments" && (() => {
         const q = paymentSearch.trim().toLowerCase();
         const thisMonthKey = new Date().toISOString().slice(0, 7);
-        const paymentsThisMonth = (payments || []).filter(p => p.date?.slice(0, 7) === thisMonthKey)
-          .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-        const filtered = paymentsThisMonth.filter(p => {
+        const matchesSearch = (p, member) => {
           if (!q) return true;
-          const member = members.find(m => m.membershipId === p.memberId);
           const haystack = [
             p.memberId, member?.name, p.childMemberName,
             p.bookPlan, p.paymentMethod, p.paymentType,
             p.nextFeeMonth, p.fromAccount, p.panNo, p.date,
           ].filter(Boolean).join(" ").toLowerCase();
           return haystack.includes(q);
+        };
+        const renderPaymentsTable = (list, emptyMessage) => (
+          list.length === 0 ? (
+            <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 16, padding: "48px 24px", textAlign: "center" }}>
+              <div style={{ width: 64, height: 64, background: C.green + "18", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
+                <Icon name="rupee" size={30} color={C.green} />
+              </div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: C.green, marginBottom: 8 }}>No Payments Found</div>
+              <div style={{ fontSize: 14, color: C.gray600, maxWidth: 380, margin: "0 auto", lineHeight: 1.6 }}>{emptyMessage}</div>
+            </div>
+          ) : (
+            <div className="revenue-tbl-scroll">
+              <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 12, overflow: "hidden" }}>
+                <div className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "0.9fr 1.5fr 1fr 0.9fr 1fr 1fr 1fr", padding: "10px 18px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase" }}>
+                  <span>Date</span><span>Member</span><span>Plan</span><span>Amount</span><span>Method</span><span>Type</span><span>Next Fee Month</span>
+                </div>
+                {list.map((p, i) => {
+                  const member = members.find(m => m.membershipId === p.memberId);
+                  return (
+                    <div key={p.id} className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "0.9fr 1.5fr 1fr 0.9fr 1fr 1fr 1fr", padding: "12px 18px", borderTop: `1px solid ${C.gray100}`, alignItems: "center", background: i % 2 === 0 ? C.white : C.gray50 }}>
+                      <span style={{ fontSize: 13, color: C.gray700 }}>{p.date || "—"}</span>
+                      <div>
+                        <div style={{ fontWeight: 700, color: C.green, fontSize: 13 }}>{member?.name || p.childMemberName || "—"}</div>
+                        <div style={{ fontSize: 11, color: C.gray600 }}>{p.memberId}</div>
+                      </div>
+                      <span style={{ fontSize: 13, color: C.gray700 }}>{p.bookPlan || "—"}</span>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: C.greenMid }}>₹{p.amountPaid.toLocaleString()}</span>
+                      <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentMethod || "—"}</span>
+                      <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentType || "—"}</span>
+                      <span style={{ fontSize: 13, color: C.gray700 }}>{p.nextFeeMonth || "—"}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )
+        );
+
+        const pillStyle = (active) => ({
+          background: active ? C.green : C.white, color: active ? C.white : C.gray600,
+          border: `1px solid ${active ? C.green : C.gray200}`, borderRadius: 20, padding: "7px 16px",
+          fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
         });
-        const thisMonthCollected = paymentsThisMonth.reduce((s, p) => s + p.amountPaid, 0);
-        const thisMonthPayerCount = new Set(paymentsThisMonth.map(p => p.memberId)).size;
 
         return (
           <div>
-            <h2 style={{ margin: "0 0 6px", color: C.green, fontSize: 16, fontWeight: 700 }}>Payments Received</h2>
-            <p style={{ color: C.gray600, fontSize: 13, margin: "0 0 20px" }}>Members who have made a payment this month.</p>
+            <h2 style={{ margin: "0 0 6px", color: C.green, fontSize: 16, fontWeight: 700 }}>Payments</h2>
+            <p style={{ color: C.gray600, fontSize: 13, margin: "0 0 16px" }}>Track membership fee payments collected from members.</p>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14, marginBottom: 20 }}>
-              <StatCard label="Payments This Month" value={paymentsThisMonth.length} icon="money" color={C.green} />
-              <StatCard label="Members Paid" value={thisMonthPayerCount} icon="users" color={C.blue} />
-              <StatCard label="Total Collected" value={`₹${thisMonthCollected.toLocaleString()}`} icon="check" color={C.greenMid} />
+            <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+              <button style={pillStyle(paymentsSubTab === "received")} onClick={() => setPaymentsSubTab("received")}>Payments Received</button>
+              <button style={pillStyle(paymentsSubTab === "history")} onClick={() => setPaymentsSubTab("history")}>Payment History</button>
             </div>
 
-            <div style={{ marginBottom: 6 }}>
-              <Input placeholder="Search member, plan, method (e.g. 2 Books)…" value={paymentSearch} onChange={e => setPaymentSearch(e.target.value)} />
-            </div>
-
-            {paymentsThisMonth.length === 0 ? (
-              <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 16, padding: "48px 24px", textAlign: "center" }}>
-                <div style={{ width: 64, height: 64, background: C.green + "18", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
-                  <Icon name="money" size={30} color={C.green} />
-                </div>
-                <div style={{ fontSize: 18, fontWeight: 800, color: C.green, marginBottom: 8 }}>No Payments Yet This Month</div>
-                <div style={{ fontSize: 14, color: C.gray600, maxWidth: 380, margin: "0 auto", lineHeight: 1.6 }}>
-                  Payments recorded this month will show up here.
-                </div>
-              </div>
-            ) : (
-              <div className="revenue-tbl-scroll">
-                <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 12, overflow: "hidden" }}>
-                  <div className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "0.9fr 1.5fr 1fr 0.9fr 1fr 1fr 1fr", padding: "10px 18px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase" }}>
-                    <span>Date</span><span>Member</span><span>Plan</span><span>Amount</span><span>Method</span><span>Type</span><span>Next Fee Month</span>
+            {paymentsSubTab === "received" ? (() => {
+              const paymentsThisMonth = (payments || []).filter(p => p.date?.slice(0, 7) === thisMonthKey)
+                .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+              const filtered = paymentsThisMonth.filter(p => matchesSearch(p, members.find(m => m.membershipId === p.memberId)));
+              const thisMonthCollected = paymentsThisMonth.reduce((s, p) => s + p.amountPaid, 0);
+              const thisMonthPayerCount = new Set(paymentsThisMonth.map(p => p.memberId)).size;
+              return (
+                <div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14, marginBottom: 20 }}>
+                    <StatCard label="Payments This Month" value={paymentsThisMonth.length} icon="rupee" color={C.green} />
+                    <StatCard label="Members Paid" value={thisMonthPayerCount} icon="users" color={C.blue} />
+                    <StatCard label="Total Collected" value={`₹${thisMonthCollected.toLocaleString()}`} icon="check" color={C.greenMid} />
                   </div>
-                  {filtered.map((p, i) => {
-                    const member = members.find(m => m.membershipId === p.memberId);
-                    return (
-                      <div key={p.id} className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "0.9fr 1.5fr 1fr 0.9fr 1fr 1fr 1fr", padding: "12px 18px", borderTop: `1px solid ${C.gray100}`, alignItems: "center", background: i % 2 === 0 ? C.white : C.gray50 }}>
-                        <span style={{ fontSize: 13, color: C.gray700 }}>{p.date || "—"}</span>
-                        <div>
-                          <div style={{ fontWeight: 700, color: C.green, fontSize: 13 }}>{member?.name || p.childMemberName || "—"}</div>
-                          <div style={{ fontSize: 11, color: C.gray600 }}>{p.memberId}</div>
-                        </div>
-                        <span style={{ fontSize: 13, color: C.gray700 }}>{p.bookPlan || "—"}</span>
-                        <span style={{ fontSize: 14, fontWeight: 700, color: C.greenMid }}>₹{p.amountPaid.toLocaleString()}</span>
-                        <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentMethod || "—"}</span>
-                        <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentType || "—"}</span>
-                        <span style={{ fontSize: 13, color: C.gray700 }}>{p.nextFeeMonth || "—"}</span>
-                      </div>
-                    );
-                  })}
-                  {filtered.length === 0 && (
-                    <div style={{ padding: "24px 18px", textAlign: "center", color: C.gray600, fontSize: 13 }}>No payments match your search.</div>
-                  )}
+                  <div style={{ marginBottom: 6 }}>
+                    <Input placeholder="Search member, plan, method (e.g. 2 Books)…" value={paymentSearch} onChange={e => setPaymentSearch(e.target.value)} />
+                  </div>
+                  {renderPaymentsTable(filtered, "Payments recorded this month will show up here.")}
                 </div>
-              </div>
-            )}
+              );
+            })() : (() => {
+              const monthOptions = Array.from(new Set((payments || []).map(p => p.date ? p.date.slice(0, 7) : null).filter(Boolean))).sort().reverse();
+              const allFiltered = (payments || [])
+                .filter(p => !paymentMonthFilter || p.date?.slice(0, 7) === paymentMonthFilter)
+                .filter(p => matchesSearch(p, members.find(m => m.membershipId === p.memberId)))
+                .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+              const totalFiltered = allFiltered.reduce((s, p) => s + p.amountPaid, 0);
+              return (
+                <div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14, marginBottom: 20 }}>
+                    <StatCard label="Total Payments" value={(payments || []).length.toLocaleString()} icon="rupee" color={C.green} />
+                    <StatCard label={paymentMonthFilter || q ? "Filtered Total" : "All-Time Collected"} value={`₹${totalFiltered.toLocaleString()}`} icon="check" color={C.greenMid} />
+                  </div>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 6, alignItems: "flex-start" }}>
+                    <div style={{ flex: 1, minWidth: 220 }}>
+                      <Input placeholder="Search member, plan, method, month (e.g. Jun-26, 2 Books)…" value={paymentSearch} onChange={e => setPaymentSearch(e.target.value)} />
+                    </div>
+                    <div style={{ minWidth: 160 }}>
+                      <Select value={paymentMonthFilter} onChange={e => setPaymentMonthFilter(e.target.value)} options={[{ value: "", label: "All Months" }, ...monthOptions.map(mo => ({ value: mo, label: mo }))]} />
+                    </div>
+                  </div>
+                  {renderPaymentsTable(allFiltered, "Payment records will appear here once they're collected and synced from the payments table.")}
+                </div>
+              );
+            })()}
           </div>
         );
       })()}
@@ -3961,11 +4045,26 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
 
       {/* ── RENEW MEMBER MODAL ── */}
       {renewModal && (() => {
-        const { member: m, plan } = renewModal;
-        const diff    = daysDiff(m.renewalDue);
-        const overdue = diff < 0;
+        const { member: m, plan: modalPlan } = renewModal;
+        const plan = modalPlan || resolvePlan(m.plan);
         const ex      = renewExtras;
         const resetExtras = () => setRenewExtras({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
+        const closeModal = () => { setRenewModal(null); resetExtras(); setCollectMode("total"); setManualPaidMonth(""); };
+
+        // Recompute arrears here (rather than trusting the caller) so the modal works whether it's
+        // opened from the Renewals tab (which precomputes this) or the Members tab pop-out (which doesn't).
+        const statusRow = (memberStatuses || []).find(s => s.memberId === m.membershipId);
+        const paidDate = statusRow?.lastPaidMonth ? new Date(statusRow.lastPaidMonth) : null;
+        const validPaidDate = paidDate && !isNaN(paidDate) ? paidDate : null;
+        const dueBase = validPaidDate ? new Date(validPaidDate) : new Date(m.joined || today());
+        dueBase.setMonth(dueBase.getMonth() + 1);
+        const renewalDue = dueBase.toISOString().split("T")[0];
+        const diff    = daysDiff(renewalDue);
+        const overdue = diff < 0;
+        const monthlyCost = plan?.cost || 0;
+        const overdueMonths = Math.max(0, monthDiff(dueBase, renewalCurrentMonthStart));
+        const overdueAmount = overdueMonths * monthlyCost;
+        const dueThisMonthAmount = monthlyCost;
 
         const lateFeeAmt         = m.fees || 0;
         const lostBookAmt        = settings.fees.bookLostFee      || 500;
@@ -3977,13 +4076,24 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
           (ex.lostBook        ? lostBookAmt        * (ex.lostBookQty    || 1)    : 0) +
           (ex.damagedBook     ? damagedBookAmt     * (ex.damagedBookQty || 1)    : 0) +
           (ex.cautionDeposit  ? cautionDepositAmt                                : 0);
-        const total = (plan?.cost || 0) + extraTotal;
+        const total = overdueAmount + dueThisMonthAmount + extraTotal;
+
+        const currentMonthLabel = monthYearLabel(renewalCurrentMonthStart.getFullYear(), renewalCurrentMonthStart.getMonth());
+        const defaultMonthValue = `${renewalCurrentMonthStart.getFullYear()}-${String(renewalCurrentMonthStart.getMonth() + 1).padStart(2, "0")}`;
+        const confirmRenew = () => {
+          let lastPaidMonthText = currentMonthLabel;
+          if (collectMode === "partial") {
+            const [y, mo] = (manualPaidMonth || defaultMonthValue).split("-").map(Number);
+            lastPaidMonthText = monthYearLabel(y, mo - 1);
+          }
+          renewMember(m.id, { lateFeeCollected: ex.lateFee, currentFees: m.fees || 0, membershipId: m.membershipId, memberName: m.name, lastPaidMonthText });
+        };
 
         // Shared styles for qty stepper buttons
         const qtyBtn = { width: 26, height: 26, borderRadius: 4, border: `1px solid ${C.gray200}`, background: C.white, cursor: "pointer", fontSize: 15, lineHeight: 1, fontFamily: "inherit" };
 
         return (
-          <Modal open title="Collect & Renew Membership" width={500} onClose={() => { setRenewModal(null); resetExtras(); }}>
+          <Modal open title="Collect & Renew Membership" width={500} onClose={closeModal}>
             <div>
               {/* Member info */}
               <div style={{ background: overdue ? C.redLight : C.blueLight, border: `1px solid ${overdue ? C.red : C.blue}30`, borderRadius: 10, padding: "12px 16px", marginBottom: 18 }}>
@@ -3991,7 +4101,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 <div style={{ fontSize: 12, color: C.gray600, marginTop: 2 }}>{m.email}</div>
                 <div style={{ display: "flex", gap: 14, marginTop: 8, flexWrap: "wrap" }}>
                   <span style={{ fontSize: 12 }}><span style={{ color: C.gray600 }}>Plan: </span><strong style={{ color: C.green }}>{plan?.name || "—"}</strong></span>
-                  <span style={{ fontSize: 12 }}><span style={{ color: C.gray600 }}>Due: </span><strong style={{ color: overdue ? C.red : "#E67E22" }}>{m.renewalDue} {overdue ? `(${Math.abs(diff)}d overdue)` : diff === 0 ? "(today)" : `(in ${diff}d)`}</strong></span>
+                  <span style={{ fontSize: 12 }}><span style={{ color: C.gray600 }}>Due: </span><strong style={{ color: overdue ? C.red : "#E67E22" }}>{renewalDue} {overdue ? `(${Math.abs(diff)}d overdue)` : diff === 0 ? "(today)" : `(in ${diff}d)`}</strong></span>
                 </div>
               </div>
 
@@ -4000,9 +4110,15 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 <div style={{ fontSize: 12, color: C.gray600, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>Payment Breakdown</div>
 
                 {/* Membership fee — always */}
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "8px 0" }}>
-                  <span style={{ fontWeight: 600 }}>{plan?.name} — 1 month renewal</span>
-                  <span style={{ fontWeight: 700 }}>₹{(plan?.cost || 0).toLocaleString()}</span>
+                {overdueMonths > 0 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "8px 0" }}>
+                    <span style={{ fontWeight: 600, color: C.red }}>Overdue — {overdueMonths} month{overdueMonths > 1 ? "s" : ""}</span>
+                    <span style={{ fontWeight: 700, color: C.red }}>₹{overdueAmount.toLocaleString()}</span>
+                  </div>
+                )}
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "8px 0", borderTop: overdueMonths > 0 ? `1px solid ${C.gray100}` : "none" }}>
+                  <span style={{ fontWeight: 600 }}>{plan?.name} — {overdueMonths > 0 ? "this month" : "1 month renewal"}</span>
+                  <span style={{ fontWeight: 700 }}>₹{dueThisMonthAmount.toLocaleString()}</span>
                 </div>
 
                 <div style={{ fontSize: 12, color: C.gray600, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, margin: "10px 0 2px" }}>Additional Charges</div>
@@ -4089,12 +4205,38 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 </div>
               </div>
 
+              {/* Last Paid Month — controls what gets written to the status table */}
+              <div style={{ background: C.gray50, borderRadius: 10, padding: "14px 16px", marginBottom: 18, border: `1px solid ${C.gray100}` }}>
+                <div style={{ fontSize: 12, color: C.gray600, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 }}>Last Paid Month</div>
+                <div style={{ display: "flex", gap: 18, marginBottom: collectMode === "partial" ? 12 : 0 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer", fontWeight: collectMode === "total" ? 700 : 400, color: collectMode === "total" ? C.gray900 : C.gray600 }}>
+                    <input type="radio" name="collectMode" checked={collectMode === "total"} onChange={() => setCollectMode("total")} style={{ accentColor: C.green, cursor: "pointer" }} />
+                    Total Due
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer", fontWeight: collectMode === "partial" ? 700 : 400, color: collectMode === "partial" ? C.gray900 : C.gray600 }}>
+                    <input type="radio" name="collectMode" checked={collectMode === "partial"} onChange={() => setCollectMode("partial")} style={{ accentColor: C.green, cursor: "pointer" }} />
+                    Partial / Advance
+                  </label>
+                </div>
+                {collectMode === "total" ? (
+                  <div style={{ fontSize: 12, color: C.gray600 }}>Marks the member paid through <strong>{currentMonthLabel}</strong>.</div>
+                ) : (
+                  <div>
+                    <div style={{ fontSize: 12, color: C.gray600, marginBottom: 6 }}>
+                      Choose the last month this payment covers — a past month if they're only paying part of what's owed, or a future month if they're paying in advance.
+                    </div>
+                    <input type="month" value={manualPaidMonth || defaultMonthValue} onChange={e => setManualPaidMonth(e.target.value)}
+                      style={{ padding: "8px 10px", borderRadius: 6, border: `1px solid ${C.gray300}`, fontSize: 13, fontFamily: "inherit" }} />
+                  </div>
+                )}
+              </div>
+
               <p style={{ fontSize: 13, color: C.gray600, margin: "0 0 18px" }}>
                 Check applicable charges, collect payment, then click <strong>Confirm & Renew</strong>.
               </p>
               <div style={{ display: "flex", gap: 10 }}>
-                <Btn onClick={() => renewMember(m.id, { lateFeeCollected: ex.lateFee, currentFees: m.fees || 0 })} variant="primary" icon="check">Confirm & Renew</Btn>
-                <Btn onClick={() => { setRenewModal(null); resetExtras(); }} variant="ghost">Cancel</Btn>
+                <Btn onClick={confirmRenew} variant="primary" icon="check">Confirm & Renew</Btn>
+                <Btn onClick={closeModal} variant="ghost">Cancel</Btn>
               </div>
             </div>
           </Modal>
@@ -4667,7 +4809,7 @@ export default function App() {
           requests={requests} setRequests={setRequests}
           bookCopies={bookCopies} setBookCopies={setBookCopies}
           waitlist={waitlist} setWaitlist={setWaitlist}
-          payments={payments} memberStatuses={memberStatuses}
+          payments={payments} memberStatuses={memberStatuses} setMemberStatuses={setMemberStatuses}
           settings={settings} onSettings={setSettings}
           isAdmin={false}
         />
@@ -4683,7 +4825,7 @@ export default function App() {
           requests={requests} setRequests={setRequests}
           bookCopies={bookCopies} setBookCopies={setBookCopies}
           waitlist={waitlist} setWaitlist={setWaitlist}
-          payments={payments} memberStatuses={memberStatuses}
+          payments={payments} memberStatuses={memberStatuses} setMemberStatuses={setMemberStatuses}
           settings={settings} onSettings={setSettings}
           isAdmin={true}
         />
