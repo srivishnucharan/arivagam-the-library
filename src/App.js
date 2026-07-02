@@ -710,6 +710,13 @@ const TopNav = ({ user, onLogout, onNavigate, currentPage, settings }) => {
           .books-tbl-row > div:nth-child(7) { flex: 0 0 100%; margin-top: 6px; }
         }
 
+        /* A-Z rail: vertical column on desktop → horizontal scroll strip on mobile */
+        @media (max-width: 640px) {
+          .books-tbl-scroll-wrap { flex-direction: column !important; }
+          .az-scroll-rail { position: static !important; flex-direction: row !important; overflow-x: auto; width: 100%; -webkit-overflow-scrolling: touch; }
+          .az-scroll-rail button { flex: 0 0 auto; }
+        }
+
         /* Member detail: 280px sidebar + content → stacked */
         @media (max-width: 768px) {
           .member-detail-grid { grid-template-columns: 1fr !important; }
@@ -1768,6 +1775,7 @@ const autoMapCSVHeaders = (headers) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, setLibrarians, settings, onSettings, transactions, setTransactions, requests, setRequests, bookCopies, setBookCopies, waitlist, setWaitlist, payments, memberStatuses, setMemberStatuses, isAdmin, branches, setBranches }) => {
   const [tab, setTab] = useState("books");
+  const [bookSearch, setBookSearch] = useState("");
   const [paymentSearch, setPaymentSearch] = useState("");
   const [paymentsSubTab, setPaymentsSubTab] = useState("received"); // "received" | "history"
   const [paymentMonthFilter, setPaymentMonthFilter] = useState("");
@@ -2507,23 +2515,49 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       </div>
 
       {/* ══ BOOKS TAB ══ */}
-      {tab === "books" && (
+      {tab === "books" && (() => {
+        const q = bookSearch.trim().toLowerCase();
+        const filteredBooks = books.filter(b => !q || [b.title, b.author, b.genre, b.language, b.catalogueId, b.callNumberSuffix, b.isbn]
+          .filter(Boolean).some(v => String(v).toLowerCase().includes(q)));
+        // books arrives pre-sorted by title, so the first row for each letter is a stable jump target
+        const AZ = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+        const letterFirstIndex = {};
+        filteredBooks.forEach((b, i) => {
+          const letter = (b.title || "").trim().charAt(0).toUpperCase();
+          if (AZ.includes(letter) && letterFirstIndex[letter] === undefined) letterFirstIndex[letter] = i;
+        });
+        const scrollToLetter = (letter) => {
+          document.getElementById(`book-row-${letter}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+        };
+        return (
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
-            <h2 style={{ margin: 0, color: C.green, fontSize: 16, fontWeight: 700 }}>Book Catalog ({books.length})</h2>
+            <h2 style={{ margin: 0, color: C.green, fontSize: 16, fontWeight: 700 }}>Book Catalog ({q ? `${filteredBooks.length} of ${books.length}` : books.length})</h2>
             <Btn variant="primary" icon="plus" onClick={() => { setBookForm(emptyBook); setEditBook(null); setShowBookForm(true); }}>Add Book</Btn>
           </div>
-          <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 12, overflow: "hidden" }}>
+          <div style={{ marginBottom: 14, position: "relative", maxWidth: 360 }}>
+            <input value={bookSearch} onChange={e => setBookSearch(e.target.value)} placeholder="Search title, author, genre, call no…"
+              style={{ width: "100%", padding: "8px 12px 8px 34px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 13, fontFamily: "inherit", outline: "none", boxSizing: "border-box" }}
+              onFocus={e => e.target.style.borderColor = C.green} onBlur={e => e.target.style.borderColor = C.gray300} />
+            <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }}><Icon name="search" size={14} color={C.gray300} /></span>
+          </div>
+          <div className="books-tbl-scroll-wrap" style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+          <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 12, overflow: "hidden", flex: 1, minWidth: 0 }}>
             {/* Header */}
             <div className="books-tbl-head" style={{ display: "grid", gridTemplateColumns: "2fr 1.2fr 1fr 130px 70px 70px 110px", gap: 10, padding: "10px 16px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5 }}>
               <span>Title / Author</span><span>Genre</span><span>Language</span><span>Call No. Suffix</span><span>Copies</span><span>Avail.</span><span>Actions</span>
             </div>
-            {books.map((b, i) => {
+            {filteredBooks.length === 0 && (
+              <div style={{ padding: "32px 18px", textAlign: "center", color: C.gray600, fontSize: 13 }}>No books match your search.</div>
+            )}
+            {filteredBooks.map((b, i) => {
               const colorEntry = COLOR_CODES.find(c => c.code === b.colorCode);
               const copies = bookCopies.filter(c => c.bookId === b.id);
               const isExpanded = expandedBookId === b.id;
+              const letter = (b.title || "").trim().charAt(0).toUpperCase();
+              const rowId = letterFirstIndex[letter] === i ? `book-row-${letter}` : undefined;
               return (
-                <div key={b.id} style={{ borderTop: `1px solid ${C.gray100}` }}>
+                <div key={b.id} id={rowId} style={{ borderTop: `1px solid ${C.gray100}`, scrollMarginTop: 12 }}>
                   {/* Book row */}
                   <div className="books-tbl-row" style={{ display: "grid", gridTemplateColumns: "2fr 1.2fr 1fr 130px 70px 70px 110px", gap: 10, padding: "12px 16px", alignItems: "center", background: i % 2 === 0 ? C.white : C.gray50 }}>
                     <div>
@@ -2592,8 +2626,24 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
               );
             })}
           </div>
+          {/* A-Z quick scroll */}
+          <div className="az-scroll-rail" style={{ position: "sticky", top: 20, display: "flex", flexDirection: "column", gap: 1, background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 10, padding: "6px 3px", flexShrink: 0 }}>
+            {AZ.map(letter => {
+              const has = letterFirstIndex[letter] !== undefined;
+              return (
+                <button key={letter} onClick={() => has && scrollToLetter(letter)} disabled={!has}
+                  style={{ width: 22, height: 18, border: "none", background: "none", borderRadius: 4, fontSize: 10, fontWeight: 700, fontFamily: "inherit", color: has ? C.green : C.gray200, cursor: has ? "pointer" : "default" }}
+                  onMouseEnter={e => { if (has) e.currentTarget.style.background = C.green + "18"; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = "none"; }}>
+                  {letter}
+                </button>
+              );
+            })}
+          </div>
+          </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* ══ MEMBERS TAB ══ */}
       {tab === "members" && !selectedMember && (
