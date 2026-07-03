@@ -1820,8 +1820,6 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   useEffect(() => { setLocalSettings(settings); }, [settings]);
   const [toast, setToast] = useState(null);
   const [returnConfirm, setReturnConfirm] = useState(null);
-  const [activateModal, setActivateModal] = useState(null); // { member }
-  const [activatePlanId, setActivatePlanId] = useState("");
   const [renewModal, setRenewModal] = useState(null); // { member, plan }
   const [renewExtras, setRenewExtras] = useState({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
   const [collectMode, setCollectMode] = useState("total"); // "total" | "partial" — how last_paid_month gets set on renew
@@ -2277,8 +2275,6 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       activatedMember = offlineMember;
       showToast(`Membership activated (offline)! ID: ${newMembershipId}`);
     }
-    setActivateModal(null);
-    setActivatePlanId("");
     // Fire welcome email — non-blocking, silent on failure
     if (activatedMember?.email) {
       supabase.functions.invoke("welcome-email", {
@@ -2778,7 +2774,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }} onClick={e => e.stopPropagation()}>
                       {(m.activationStatus || "").trim().toLowerCase() === "pending" && <Badge label="Pending Activation" color={C.orange} />}
                       {(m.activationStatus || "").trim().toLowerCase() === "pending" && (
-                        <Btn size="sm" variant="secondary" icon="check" onClick={() => { setActivateModal({ member: m }); setActivatePlanId((settings.plans || DEFAULT_PLANS)[0]?.id || ""); }}>Activate</Btn>
+                        <Btn size="sm" variant="secondary" icon="check" onClick={() => approveMember(m.id, m.plan)}>Activate</Btn>
                       )}
                       <button onClick={() => openEditMember(m)} style={{ background: C.blueLight, border: "none", cursor: "pointer", padding: "6px 9px", borderRadius: 6 }} title="Edit"><Icon name="edit" size={13} color={C.blue} /></button>
                       {isAdmin && (
@@ -2921,7 +2917,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 16 }}>
                     <Btn variant="secondary" icon="edit" onClick={() => openEditMember(m)}>Edit Profile</Btn>
                     {(m.activationStatus || "").trim().toLowerCase() === "pending" && (
-                      <Btn variant="primary" icon="check" onClick={() => { setActivateModal({ member: m }); setActivatePlanId((settings.plans || DEFAULT_PLANS)[0]?.id || ""); }}>Activate Member</Btn>
+                      <Btn variant="primary" icon="check" onClick={() => approveMember(m.id, m.plan)}>Activate Member</Btn>
                     )}
                   </div>
                 </div>
@@ -4222,33 +4218,6 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
           }} variant="primary">Create Branch</Btn>
           <Btn onClick={() => setShowBranchForm(false)} variant="ghost">Cancel</Btn>
         </div>
-      </Modal>
-
-      {/* Return confirmation modal */}
-      {/* ── ACTIVATE MEMBER MODAL ── */}
-      <Modal open={!!activateModal} onClose={() => { setActivateModal(null); setActivatePlanId(""); }} title="Activate Membership" width={420}>
-        {activateModal && (
-          <div>
-            <p style={{ color: C.gray900, fontSize: 14, margin: "0 0 16px" }}>
-              Activating <strong>{activateModal.member.name}</strong>. Select a membership plan:
-            </p>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
-              {(settings.plans || DEFAULT_PLANS).map(plan => (
-                <label key={plan.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", border: `2px solid ${activatePlanId === plan.id ? C.green : C.gray100}`, borderRadius: 10, cursor: "pointer", background: activatePlanId === plan.id ? C.green + "0d" : C.white }}>
-                  <input type="radio" name="plan" value={plan.id} checked={activatePlanId === plan.id} onChange={() => setActivatePlanId(plan.id)} style={{ accentColor: C.green }} />
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 700, color: C.green, fontSize: 14 }}>{plan.name}</div>
-                    <div style={{ fontSize: 12, color: C.gray600 }}>Borrow up to {plan.borrowLimit} book{plan.borrowLimit > 1 ? "s" : ""} · ₹{plan.cost}/month{plan.refundableDeposit ? ` · Deposit ₹${plan.refundableDeposit}` : ""}</div>
-                  </div>
-                </label>
-              ))}
-            </div>
-            <div style={{ display: "flex", gap: 10 }}>
-              <Btn onClick={() => approveMember(activateModal.member.id, activatePlanId)} variant="primary" icon="check" disabled={!activatePlanId}>Activate Member</Btn>
-              <Btn onClick={() => { setActivateModal(null); setActivatePlanId(""); }} variant="ghost">Cancel</Btn>
-            </div>
-          </div>
-        )}
       </Modal>
 
       {/* ── RENEW MEMBER MODAL ── */}
