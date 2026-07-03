@@ -4738,6 +4738,13 @@ export default function App() {
   const [pageParams,   setPageParams]   = useState({});
   const [selectedBook, setSelectedBook] = useState(null);
   const [toast,        setToast]        = useState(null);
+  const [showBackToTop, setShowBackToTop] = useState(false);
+
+  useEffect(() => {
+    const onScroll = () => setShowBackToTop(window.scrollY > 400);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
 
   const showToast = useCallback((message, type = "success") => setToast({ message, type }), []);
 
@@ -4927,6 +4934,14 @@ export default function App() {
         <button onClick={() => navigate("login")}
           style={{ position: "fixed", bottom: 24, right: 24, background: C.green, color: C.white, border: "none", padding: "12px 20px", borderRadius: 40, boxShadow: "0 8px 24px rgba(0,0,0,.25)", cursor: "pointer", display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700, zIndex: 500, fontFamily: "inherit" }}>
           <Icon name="user" size={16} color={C.gold} /> Sign In / Register
+        </button>
+      )}
+
+      {/* Floating back-to-top button, appears after scrolling down */}
+      {showBackToTop && (
+        <button onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} title="Back to top" aria-label="Back to top"
+          style={{ position: "fixed", bottom: 24, left: 24, width: 44, height: 44, borderRadius: "50%", background: C.green, color: C.white, border: "none", cursor: "pointer", boxShadow: "0 8px 24px rgba(0,0,0,.25)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 500 }}>
+          <Icon name="chevronUp" size={20} color={C.white} />
         </button>
       )}
     </div>
