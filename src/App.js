@@ -1790,6 +1790,10 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const [editLib, setEditLib] = useState(null);
   const [showBranchForm, setShowBranchForm] = useState(false);
   const [localSettings, setLocalSettings] = useState(settings);
+  // `settings` loads asynchronously from Supabase after this component mounts, so the initial
+  // useState snapshot above is often stale — keep localSettings in sync or saving settings later
+  // (e.g. Fee Settings) would revert plans/fees back to whatever was present at mount time.
+  useEffect(() => { setLocalSettings(settings); }, [settings]);
   const [toast, setToast] = useState(null);
   const [returnConfirm, setReturnConfirm] = useState(null);
   const [activateModal, setActivateModal] = useState(null); // { member }
@@ -1817,7 +1821,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const showToast = (message, type = "success") => { setToast({ message, type }); };
 
   const emptyBook    = { title: "", author: "", genre: GENRES[0], year: "", isbn: "", copies: 1, language: "Tamil", cover: "", status: "active", catalogueNo: 0, colorCode: "", catalogueId: "", accessionNumber: "", ageGroup: "", category: "", tags: "", callNumberPrefix: "", callNumberSuffix: "" };
-  const emptyMember  = { name: "", email: "", phone: "", altPhone: "", enrollmentDate: "", childMemberName: "", childMemberDOB: "", guardianName: "", relationshipToMember: "", address: "", upiId: "", paymentMethod: "", registrationFees: "", offerType: "", refundableDeposit: "", branch: "", membershipType: "monthly", plan: "", planDescription: "", status: "pending", password: "", comments: "" };
+  const defaultBranchId = (branches.find(b => /main/i.test(b.name || "")) || branches[0] || {}).id || "";
+  const emptyMember  = { name: "", email: "", phone: "", altPhone: "", enrollmentDate: today(), childMemberName: "", childMemberDOB: "", guardianName: "", relationshipToMember: "", address: "", upiId: "", paymentMethod: "upi", registrationFees: "250", offerType: "", refundableDeposit: "", branch: defaultBranchId, membershipType: "monthly", plan: "", planDescription: "", status: "pending", password: "", comments: "" };
   const emptyLib     = { name: "", email: "", phone: "", branch: "Main", status: "active", password: "" };
   const emptyBranch  = { name: "", address: "", librarian: "" };
 
@@ -2098,6 +2103,9 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   // ── MEMBER CRUD ──
   const saveMember = async () => {
     if (!memberForm.name.trim() || !memberForm.email.trim()) { showToast("Name and Email are required.", "error"); return; }
+    if (!memberForm.phone.trim()) { showToast("Phone is required.", "error"); return; }
+    if (!memberForm.address.trim()) { showToast("Address is required.", "error"); return; }
+    if (!memberForm.plan) { showToast("Membership Plan is required.", "error"); return; }
     const autoPassword = memberForm.password.trim() || memberForm.name.split(" ")[0].toLowerCase() + Math.floor(1000 + Math.random() * 9000);
     try {
       if (editMember) {
@@ -3951,13 +3959,13 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
           <Input label="Full Name" value={memberForm.name} onChange={e => setMemberForm({ ...memberForm, name: e.target.value })} placeholder="Member's full name" icon="user" required />
           <Input label="Enrollment Date" type="date" value={memberForm.enrollmentDate} onChange={e => setMemberForm({ ...memberForm, enrollmentDate: e.target.value })} />
           <Input label="Email" type="email" value={memberForm.email} onChange={e => setMemberForm({ ...memberForm, email: e.target.value })} placeholder="email@example.com" icon="mail" required />
-          <Input label="Phone" value={memberForm.phone} onChange={e => setMemberForm({ ...memberForm, phone: e.target.value })} placeholder="+91 98765 43210" icon="phone" />
+          <Input label="Phone" value={memberForm.phone} onChange={e => setMemberForm({ ...memberForm, phone: e.target.value })} placeholder="+91 98765 43210" icon="phone" required />
           <Input label="Alternate Phone" value={memberForm.altPhone} onChange={e => setMemberForm({ ...memberForm, altPhone: e.target.value })} placeholder="+91 98765 43210" icon="phone" />
           <Input label="UPI ID" value={memberForm.upiId} onChange={e => setMemberForm({ ...memberForm, upiId: e.target.value })} placeholder="name@upi or 9876543210@paytm" hint="Used for renewal payment links" />
         </div>
         <div style={{ marginBottom: 14 }}>
-          <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 5, textTransform: "uppercase", letterSpacing: .5 }}>Address</label>
-          <textarea value={memberForm.address} onChange={e => setMemberForm({ ...memberForm, address: e.target.value })} placeholder="Full address" rows={2}
+          <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 5, textTransform: "uppercase", letterSpacing: .5 }}>Address<span style={{ color: C.red }}> *</span></label>
+          <textarea value={memberForm.address} onChange={e => setMemberForm({ ...memberForm, address: e.target.value })} placeholder="Full address" rows={2} required
             style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", resize: "vertical", outline: "none" }}
             onFocus={e => e.target.style.borderColor = C.green} onBlur={e => e.target.style.borderColor = C.gray300} />
         </div>
@@ -3990,14 +3998,26 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
         {/* ── Membership ── */}
         <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Membership</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
-          <Select label="Membership Plan" value={memberForm.plan} onChange={e => setMemberForm({ ...memberForm, plan: e.target.value })} options={[
+          <Select label="Membership Plan" required value={memberForm.plan} onChange={e => {
+            const planId = e.target.value;
+            const chosenPlan = (settings.plans || DEFAULT_PLANS).find(p => p.id === planId);
+            setMemberForm({
+              ...memberForm, plan: planId,
+              refundableDeposit: chosenPlan ? String(chosenPlan.refundableDeposit || 0) : memberForm.refundableDeposit,
+              planDescription: chosenPlan
+                ? (chosenPlan.inhouseOnly ? `${chosenPlan.name} — walk-in, no borrowing` : `${chosenPlan.name} — Borrow up to ${chosenPlan.borrowLimit} book${chosenPlan.borrowLimit !== 1 ? "s" : ""} · ₹${chosenPlan.cost}/month subscription`)
+                : memberForm.planDescription,
+            });
+          }} options={[
             { value: "", label: "— Select a plan —" },
             ...(settings.plans || DEFAULT_PLANS).map(p => ({ value: p.id, label: p.inhouseOnly ? `${p.name} (walk-in)` : `${p.name} (${p.borrowLimit} books · ₹${p.cost}/mo)` })),
           ]} />
           <Select label="Membership Type" value={memberForm.membershipType} onChange={e => setMemberForm({ ...memberForm, membershipType: e.target.value })} options={[
-            { value: "monthly",  label: "Monthly" },
-            { value: "inhouse",  label: "In-Library (Inhouse)" },
-            { value: "annual",   label: "Annual" },
+            { value: "monthly",     label: "Monthly" },
+            { value: "quarterly",   label: "Quarterly" },
+            { value: "halfyearly",  label: "Half-Yearly" },
+            { value: "annual",      label: "Annual" },
+            { value: "inhouse",     label: "In-Library (Inhouse)" },
           ]} />
         </div>
         <div style={{ marginBottom: 14 }}>
