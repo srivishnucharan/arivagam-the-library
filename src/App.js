@@ -4007,6 +4007,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
               planDescription: chosenPlan
                 ? (chosenPlan.inhouseOnly ? `${chosenPlan.name} — walk-in, no borrowing` : `${chosenPlan.name} — Borrow up to ${chosenPlan.borrowLimit} book${chosenPlan.borrowLimit !== 1 ? "s" : ""} · ₹${chosenPlan.cost}/month subscription`)
                 : memberForm.planDescription,
+              membershipType: chosenPlan ? (chosenPlan.inhouseOnly ? "inhouse" : "monthly") : memberForm.membershipType,
             });
           }} options={[
             { value: "", label: "— Select a plan —" },
