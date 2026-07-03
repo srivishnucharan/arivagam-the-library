@@ -722,8 +722,9 @@ const TopNav = ({ user, onLogout, onNavigate, currentPage, settings }) => {
           .members-tbl-row > div:first-child { flex: 0 0 100%; }
           .members-tbl-row > div:nth-child(2),
           .members-tbl-row > div:nth-child(3),
-          .members-tbl-row > div:nth-child(4) { flex: 0 0 auto; font-size: 11px !important; color: #6B6456; }
-          .members-tbl-row > div:nth-child(5) { flex: 0 0 100%; margin-top: 6px; }
+          .members-tbl-row > div:nth-child(4),
+          .members-tbl-row > div:nth-child(5) { flex: 0 0 auto; font-size: 11px !important; color: #6B6456; }
+          .members-tbl-row > div:nth-child(6) { flex: 0 0 100%; margin-top: 6px; }
         }
 
         /* A-Z rail (Books tab): vertical column on desktop → sticky horizontal strip on mobile */
@@ -2708,8 +2709,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           </div>
           <div className="members-tbl-container" style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 12, overflowX: "hidden", overflowY: "auto", maxHeight: "70vh" }}>
             {/* Header */}
-            <div className="members-tbl-head" style={{ display: "grid", gridTemplateColumns: "1.6fr 1.6fr 1fr 100px 190px", gap: 10, padding: "10px 16px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5, position: "sticky", top: 0, zIndex: 1 }}>
-              <span>Member</span><span>Contact</span><span>Plan / Joined</span><span>Activation Status</span><span>Actions</span>
+            <div className="members-tbl-head" style={{ display: "grid", gridTemplateColumns: "1.6fr 1.6fr 1fr 100px 120px 190px", gap: 10, padding: "10px 16px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5, position: "sticky", top: 0, zIndex: 1 }}>
+              <span>Member</span><span>Contact</span><span>Plan / Joined</span><span>Activation Status</span><span>Membership Status</span><span>Actions</span>
             </div>
             {filteredMembers.length === 0 && (
               <div style={{ padding: "32px 18px", textAlign: "center", color: C.gray600, fontSize: 13 }}>No members match your search.</div>
@@ -2719,7 +2720,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
               return (
                 <div key={m.id} style={{ borderTop: i > 0 ? `1px solid ${C.gray100}` : "none" }}>
                   <div className="members-tbl-row" onClick={() => setSelectedMember(m)}
-                    style={{ display: "grid", gridTemplateColumns: "1.6fr 1.6fr 1fr 100px 190px", gap: 10, padding: "12px 16px", alignItems: "center", background: m.status === "pending" ? C.goldLight + "55" : i % 2 === 0 ? C.white : C.gray50, cursor: "pointer", transition: "background .12s" }}
+                    style={{ display: "grid", gridTemplateColumns: "1.6fr 1.6fr 1fr 100px 120px 190px", gap: 10, padding: "12px 16px", alignItems: "center", background: m.status === "pending" ? C.goldLight + "55" : i % 2 === 0 ? C.white : C.gray50, cursor: "pointer", transition: "background .12s" }}
                     onMouseEnter={e => e.currentTarget.style.background = C.green + "0a"}
                     onMouseLeave={e => e.currentTarget.style.background = m.status === "pending" ? C.goldLight + "55" : i % 2 === 0 ? C.white : C.gray50}>
                     <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
@@ -2742,6 +2743,13 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
                         return <Badge label={activation || "—"} color={activation.toLowerCase() === "active" ? C.greenMid : activation.toLowerCase() === "pending" ? C.orange : C.red} />;
                       })()}
                       {m.fees > 0 && <Badge label={`₹${m.fees} due`} color={C.red} />}
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                      {(() => {
+                        const statusRow = (memberStatuses || []).find(s => s.memberId === (m.membershipId || m.id));
+                        const membershipStatus = statusRow?.status || "";
+                        return <Badge label={membershipStatus || "—"} color={/^active/i.test(membershipStatus) ? C.greenMid : membershipStatus ? C.red : C.gray300} />;
+                      })()}
                     </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }} onClick={e => e.stopPropagation()}>
                       {m.status === "pending" && (
