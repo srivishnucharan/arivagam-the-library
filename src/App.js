@@ -2776,8 +2776,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
                       {m.fees > 0 && <Badge label={`₹${m.fees} due`} color={C.red} />}
                     </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }} onClick={e => e.stopPropagation()}>
-                      {m.status === "pending" && <Badge label="Pending Activation" color={C.orange} />}
-                      {m.status === "pending" && (
+                      {(m.activationStatus || "").trim().toLowerCase() === "pending" && <Badge label="Pending Activation" color={C.orange} />}
+                      {(m.activationStatus || "").trim().toLowerCase() === "pending" && (
                         <Btn size="sm" variant="secondary" icon="check" onClick={() => { setActivateModal({ member: m }); setActivatePlanId((settings.plans || DEFAULT_PLANS)[0]?.id || ""); }}>Activate</Btn>
                       )}
                       <button onClick={() => openEditMember(m)} style={{ background: C.blueLight, border: "none", cursor: "pointer", padding: "6px 9px", borderRadius: 6 }} title="Edit"><Icon name="edit" size={13} color={C.blue} /></button>
@@ -2920,7 +2920,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                   {/* Action buttons */}
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 16 }}>
                     <Btn variant="secondary" icon="edit" onClick={() => openEditMember(m)}>Edit Profile</Btn>
-                    {m.status === "pending" && (
+                    {(m.activationStatus || "").trim().toLowerCase() === "pending" && (
                       <Btn variant="primary" icon="check" onClick={() => { setActivateModal({ member: m }); setActivatePlanId((settings.plans || DEFAULT_PLANS)[0]?.id || ""); }}>Activate Member</Btn>
                     )}
                   </div>
