@@ -722,9 +722,8 @@ const TopNav = ({ user, onLogout, onNavigate, currentPage, settings }) => {
           .members-tbl-row > div:first-child { flex: 0 0 100%; }
           .members-tbl-row > div:nth-child(2),
           .members-tbl-row > div:nth-child(3),
-          .members-tbl-row > div:nth-child(4),
-          .members-tbl-row > div:nth-child(5) { flex: 0 0 auto; font-size: 11px !important; color: #6B6456; }
-          .members-tbl-row > div:nth-child(6) { flex: 0 0 100%; margin-top: 6px; }
+          .members-tbl-row > div:nth-child(4) { flex: 0 0 auto; font-size: 11px !important; color: #6B6456; }
+          .members-tbl-row > div:nth-child(5) { flex: 0 0 100%; margin-top: 6px; }
         }
 
         /* A-Z rail (Books tab): vertical column on desktop → sticky horizontal strip on mobile */
@@ -2507,6 +2506,17 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
 
   const activeLoans = transactions.filter(t => !t.returnDate);
   const pendingMembers = members.filter(m => m.status === "pending");
+  // Membership Status bucket comes from the status table lookup (e.g. "Active", "Paused",
+  // "Closed", "In Library Reading") — anything else falls back to Active Members.
+  const membershipStatusBucket = (m) => {
+    const statusRow = (memberStatuses || []).find(s => s.memberId === (m.membershipId || m.id));
+    const status = (statusRow?.status || "").trim();
+    if (/library/i.test(status)) return "inlibrary";
+    if (/^paused/i.test(status)) return "paused";
+    if (/^closed/i.test(status)) return "closed";
+    return "active";
+  };
+  const activeMembersCount = members.filter(m => membershipStatusBucket(m) === "active").length;
 
   return (
     <div className="dash-wrap" style={{ maxWidth: 1140, margin: "0 auto", padding: "24px 20px" }}>
@@ -2520,7 +2530,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       {/* Stats */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12, marginBottom: 24 }}>
         <StatCard label="Total Books" value={books.length} icon="book" color={C.green} onClick={() => setTab("books")} />
-        <StatCard label="Active Members" value={members.filter(m => m.status === "active").length} icon="users" color={C.greenMid} onClick={() => { setTab("members"); setMemberFilter(null); setSelectedMember(null); }} />
+        <StatCard label="Active Members" value={activeMembersCount} icon="users" color={C.greenMid} onClick={() => { setTab("members"); setMemberFilter(null); setSelectedMember(null); }} />
         <StatCard label="Pending Membership Approval" value={pendingMembers.length} icon="alert" color={pendingMembers.length > 0 ? C.orange : C.gray300} onClick={() => { setTab("members"); setMemberFilter("pending"); setSelectedMember(null); }} />
         <StatCard label="Active Loans" value={activeLoans.length} icon="eye" color={C.blue} onClick={() => setTab("loans")} />
         <StatCard label="Pending Renewals" value={renewalDueSoon.length} icon="calendar" color={renewalDueSoon.length > 0 ? "#E67E22" : C.gray300} onClick={() => { setTab("renewals"); setRenewalFilter("pending"); }} />
@@ -2682,16 +2692,6 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       {tab === "members" && !selectedMember && (() => {
         const q = memberSearch.trim().toLowerCase();
         const sortedMembers = [...members].sort((a, b) => String(a.membershipId || a.id).localeCompare(String(b.membershipId || b.id)));
-        // Membership Status bucket comes from the status table lookup; InLibrary (inhouse) members are
-        // carved out first so they only ever appear under their own tab, never under Active Members too.
-        const membershipStatusBucket = (m) => {
-          if (m.membershipType === "inhouse") return "inlibrary";
-          const statusRow = (memberStatuses || []).find(s => s.memberId === (m.membershipId || m.id));
-          const status = (statusRow?.status || "").trim();
-          if (/^paused/i.test(status)) return "paused";
-          if (/^closed/i.test(status)) return "closed";
-          return "active";
-        };
         const statusTabCounts = { active: 0, paused: 0, closed: 0, inlibrary: 0 };
         members.forEach(m => { statusTabCounts[membershipStatusBucket(m)]++; });
         const statusTabs = [
@@ -2739,8 +2739,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           </div>
           <div className="members-tbl-container" style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 12, overflowX: "hidden", overflowY: "auto", maxHeight: "70vh" }}>
             {/* Header */}
-            <div className="members-tbl-head" style={{ display: "grid", gridTemplateColumns: "1.6fr 1.6fr 1fr 100px 120px 190px", gap: 10, padding: "10px 16px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5, position: "sticky", top: 0, zIndex: 1 }}>
-              <span>Member</span><span>Contact</span><span>Plan / Joined</span><span>Activation Status</span><span>Membership Status</span><span>Actions</span>
+            <div className="members-tbl-head" style={{ display: "grid", gridTemplateColumns: "1.6fr 1.6fr 1fr 130px 230px", gap: 10, padding: "10px 16px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5, position: "sticky", top: 0, zIndex: 1 }}>
+              <span>Member</span><span>Contact</span><span>Plan / Joined</span><span>Membership Status</span><span>Actions</span>
             </div>
             {filteredMembers.length === 0 && (
               <div style={{ padding: "32px 18px", textAlign: "center", color: C.gray600, fontSize: 13 }}>No members match your search.</div>
@@ -2750,7 +2750,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
               return (
                 <div key={m.id} style={{ borderTop: i > 0 ? `1px solid ${C.gray100}` : "none" }}>
                   <div className="members-tbl-row" onClick={() => setSelectedMember(m)}
-                    style={{ display: "grid", gridTemplateColumns: "1.6fr 1.6fr 1fr 100px 120px 190px", gap: 10, padding: "12px 16px", alignItems: "center", background: m.status === "pending" ? C.goldLight + "55" : i % 2 === 0 ? C.white : C.gray50, cursor: "pointer", transition: "background .12s" }}
+                    style={{ display: "grid", gridTemplateColumns: "1.6fr 1.6fr 1fr 130px 230px", gap: 10, padding: "12px 16px", alignItems: "center", background: m.status === "pending" ? C.goldLight + "55" : i % 2 === 0 ? C.white : C.gray50, cursor: "pointer", transition: "background .12s" }}
                     onMouseEnter={e => e.currentTarget.style.background = C.green + "0a"}
                     onMouseLeave={e => e.currentTarget.style.background = m.status === "pending" ? C.goldLight + "55" : i % 2 === 0 ? C.white : C.gray50}>
                     <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
@@ -2769,19 +2769,14 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
                     </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                       {(() => {
-                        const activation = m.activationStatus || m.status || "";
-                        return <Badge label={activation || "—"} color={activation.toLowerCase() === "active" ? C.greenMid : activation.toLowerCase() === "pending" ? C.orange : C.red} />;
-                      })()}
-                      {m.fees > 0 && <Badge label={`₹${m.fees} due`} color={C.red} />}
-                    </div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                      {(() => {
                         const statusRow = (memberStatuses || []).find(s => s.memberId === (m.membershipId || m.id));
                         const membershipStatus = statusRow?.status || "";
                         return <Badge label={membershipStatus || "—"} color={/^active/i.test(membershipStatus) ? C.greenMid : membershipStatus ? C.red : C.gray300} />;
                       })()}
+                      {m.fees > 0 && <Badge label={`₹${m.fees} due`} color={C.red} />}
                     </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }} onClick={e => e.stopPropagation()}>
+                      {m.status === "pending" && <Badge label="Pending Activation" color={C.orange} />}
                       {m.status === "pending" && (
                         <Btn size="sm" variant="secondary" icon="check" onClick={() => { setActivateModal({ member: m }); setActivatePlanId((settings.plans || DEFAULT_PLANS)[0]?.id || ""); }}>Activate</Btn>
                       )}
