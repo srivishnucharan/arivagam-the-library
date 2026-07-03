@@ -54,6 +54,7 @@ const dbToUser = (u) => ({
   altPhone: u.alternate_phone_number || "",
   address: u.address || "",
   paymentMethod: u.payment_method || u.payment_mode || "",
+  paymentReferenceNo: u.payment_reference_no || "",
   registrationFees: u.onetime_registration_fees != null ? String(u.onetime_registration_fees) : "",
   offerType: u.offer_type || "",
   refundableDeposit: u.refundable_deposit != null ? String(u.refundable_deposit) : "",
@@ -1795,7 +1796,7 @@ const autoMapCSVHeaders = (headers) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // LIBRARIAN / ADMIN DASHBOARD
 // ─────────────────────────────────────────────────────────────────────────────
-const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, setLibrarians, settings, onSettings, transactions, setTransactions, requests, setRequests, bookCopies, setBookCopies, waitlist, setWaitlist, payments, memberStatuses, setMemberStatuses, isAdmin, branches, setBranches }) => {
+const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, setLibrarians, settings, onSettings, transactions, setTransactions, requests, setRequests, bookCopies, setBookCopies, waitlist, setWaitlist, payments, setPayments, memberStatuses, setMemberStatuses, isAdmin, branches, setBranches }) => {
   const [tab, setTab] = useState("books");
   const [bookSearch, setBookSearch] = useState("");
   const [memberSearch, setMemberSearch] = useState("");
@@ -1810,6 +1811,11 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const [expandedBookId, setExpandedBookId] = useState(null);
   const [showMemberForm, setShowMemberForm] = useState(false);
   const [editMember, setEditMember] = useState(null);
+  const [memberFormStep, setMemberFormStep] = useState("form"); // "form" | "payment" | "success"
+  const [createdMember, setCreatedMember] = useState(null); // the just-created member, used by the Payment step
+  const [paymentChoice, setPaymentChoice] = useState("upi"); // "cash" | "upi"
+  const [paymentTxnId, setPaymentTxnId] = useState("");
+  const [paymentSubmitting, setPaymentSubmitting] = useState(false);
   const [showLibForm, setShowLibForm] = useState(false);
   const [editLib, setEditLib] = useState(null);
   const [showBranchForm, setShowBranchForm] = useState(false);
@@ -2123,14 +2129,28 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   };
 
   // ── MEMBER CRUD ──
+  // Member IDs are assigned once, at creation, and are never reissued — every member ever created
+  // (regardless of current status) counts toward the same-month sequence so an ID is never reused.
+  const computeNextMembershipId = (joinDateStr) => {
+    const joinDate = joinDateStr || today();
+    const sameMonthCount = members.filter(m => m.joined &&
+      new Date(m.joined).getFullYear() === new Date(joinDate).getFullYear() &&
+      new Date(m.joined).getMonth() === new Date(joinDate).getMonth()
+    ).length;
+    return genMembershipId(joinDate, sameMonthCount);
+  };
+  const closeMemberForm = () => {
+    setShowMemberForm(false); setEditMember(null); setMemberForm(emptyMember);
+    setMemberFormStep("form"); setCreatedMember(null); setPaymentChoice("upi"); setPaymentTxnId("");
+  };
   const saveMember = async () => {
     if (!memberForm.name.trim() || !memberForm.email.trim()) { showToast("Name and Email are required.", "error"); return; }
     if (!memberForm.phone.trim()) { showToast("Phone is required.", "error"); return; }
     if (!memberForm.address.trim()) { showToast("Address is required.", "error"); return; }
     if (!memberForm.plan) { showToast("Membership Plan is required.", "error"); return; }
     const autoPassword = memberForm.password.trim() || memberForm.name.split(" ")[0].toLowerCase() + Math.floor(1000 + Math.random() * 9000);
-    try {
-      if (editMember) {
+    if (editMember) {
+      try {
         const updateData = {
           child_member_name: memberForm.name || memberForm.childMemberName || null,
           email_id: memberForm.email, phone_number: memberForm.phone,
@@ -2156,45 +2176,88 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         if (error) throw error;
         setMembers(members.map(m => m.id === editMember.id ? dbToUser(data) : m));
         showToast(`Member "${memberForm.name}" updated.`);
-      } else {
-        const insertData = {
-          child_member_name: memberForm.name || memberForm.childMemberName || null,
-          email_id: memberForm.email, phone_number: memberForm.phone,
-          alternate_phone_number: memberForm.altPhone || null,
-          enrollment_date: memberForm.enrollmentDate || null,
-          child_member_dateofbirth: memberForm.childMemberDOB || null,
-          parent_guardian_name: memberForm.guardianName || null,
-          relationship_to_the_member: memberForm.relationshipToMember || null,
-          address: memberForm.address || null,
-          upi_id: memberForm.upiId || null,
-          payment_method: memberForm.paymentMethod || null,
-          onetime_registration_fees: memberForm.registrationFees !== "" ? parseFloat(memberForm.registrationFees) : null,
-          offer_type: memberForm.offerType || null,
-          refundable_deposit: memberForm.refundableDeposit !== "" ? parseFloat(memberForm.refundableDeposit) : null,
-          branch_id: memberForm.branch || null,
-          password: autoPassword, role: "member", status: memberForm.status,
-          membership_type: memberForm.membershipType, fees_due: 0,
-          membership_plan_description: memberForm.planDescription || null,
-          comments: memberForm.comments || null,
-        };
-        if (memberForm.plan) insertData.membership_plan = memberForm.plan;
-        const { data, error } = await supabase.from("users").insert(insertData).select().single();
-        if (error) throw error;
-        setMembers([...members, dbToUser(data)]);
-        showToast(`Member "${memberForm.name}" created. Password: ${autoPassword}`);
-      }
-    } catch (err) {
-      // Fallback to in-memory
-      if (editMember) {
+      } catch {
         setMembers(members.map(m => m.id === editMember.id ? { ...editMember, ...memberForm } : m));
         showToast(`Member "${memberForm.name}" updated (offline).`);
-      } else {
-        const id = "MEM" + String(Date.now()).slice(-6);
-        setMembers([...members, { ...memberForm, password: autoPassword, id, membershipId: id, joined: today(), fees: 0 }]);
-        showToast(`Member "${memberForm.name}" created (offline). Password: ${autoPassword}`);
       }
+      closeMemberForm();
+      return;
     }
-    setShowMemberForm(false); setEditMember(null); setMemberForm(emptyMember);
+    // New member — assign the ID now and move to the Payment step instead of closing
+    const newMembershipId = computeNextMembershipId(memberForm.enrollmentDate);
+    try {
+      const insertData = {
+        child_member_name: memberForm.name || memberForm.childMemberName || null,
+        email_id: memberForm.email, phone_number: memberForm.phone,
+        alternate_phone_number: memberForm.altPhone || null,
+        enrollment_date: memberForm.enrollmentDate || null,
+        child_member_dateofbirth: memberForm.childMemberDOB || null,
+        parent_guardian_name: memberForm.guardianName || null,
+        relationship_to_the_member: memberForm.relationshipToMember || null,
+        address: memberForm.address || null,
+        upi_id: memberForm.upiId || null,
+        payment_method: memberForm.paymentMethod || null,
+        onetime_registration_fees: memberForm.registrationFees !== "" ? parseFloat(memberForm.registrationFees) : null,
+        offer_type: memberForm.offerType || null,
+        refundable_deposit: memberForm.refundableDeposit !== "" ? parseFloat(memberForm.refundableDeposit) : null,
+        branch_id: memberForm.branch || null,
+        password: autoPassword, role: "member", status: memberForm.status,
+        membership_id: newMembershipId,
+        membership_type: memberForm.membershipType, fees_due: 0,
+        membership_plan_description: memberForm.planDescription || null,
+        comments: memberForm.comments || null,
+      };
+      if (memberForm.plan) insertData.membership_plan = memberForm.plan;
+      const { data, error } = await supabase.from("users").insert(insertData).select().single();
+      if (error) throw error;
+      const mapped = dbToUser(data);
+      setMembers([...members, mapped]);
+      setCreatedMember(mapped);
+      setMemberFormStep("payment");
+      showToast(`Member "${memberForm.name}" created. Password: ${autoPassword}`);
+    } catch {
+      const id = "MEM" + String(Date.now()).slice(-6);
+      const offlineMember = { ...memberForm, password: autoPassword, id, membershipId: newMembershipId, joined: memberForm.enrollmentDate || today(), fees: 0 };
+      setMembers([...members, offlineMember]);
+      setCreatedMember(offlineMember);
+      setMemberFormStep("payment");
+      showToast(`Member "${memberForm.name}" created (offline). Password: ${autoPassword}`);
+    }
+  };
+  // Collects the registration/deposit/subscription payment for a just-created member and records it
+  const submitMemberPayment = async ({ member, plan, registrationFee, depositFee, subscriptionFee }) => {
+    if (!paymentTxnId.trim()) { showToast("Enter the transaction / reference number.", "error"); return; }
+    setPaymentSubmitting(true);
+    const now = new Date();
+    const thisMonthLabel = now.toLocaleString("en-IN", { month: "short" }) + "-" + String(now.getFullYear()).slice(2);
+    const next = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const nextMonthLabel = next.toLocaleString("en-IN", { month: "short" }) + "-" + String(next.getFullYear()).slice(2);
+    const dateStr = today();
+    const paymentRows = [
+      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: registrationFee, payment_method: paymentChoice, next_fee_month: null, payment_type: "Registration" },
+      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: depositFee, payment_method: paymentChoice, next_fee_month: null, payment_type: "Deposit" },
+      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: subscriptionFee, payment_method: paymentChoice, next_fee_month: nextMonthLabel, payment_type: "Subscription" },
+    ];
+    try {
+      const { data, error } = await supabase.from("payments").insert(paymentRows).select();
+      if (error) throw error;
+      setPayments?.(prev => [...prev, ...data.map(dbToPayment)]);
+    } catch { /* keep going — payment collection shouldn't block the rest of the flow */ }
+    try {
+      const { data: statusData, error: statusErr } = await supabase.from("status").insert({
+        member_id: member.membershipId, member_name: member.name,
+        status: "Pending", membership_plan: plan?.name || null,
+        last_paid_month: thisMonthLabel, number_of_books_with_member: 0,
+      }).select().single();
+      if (statusErr) throw statusErr;
+      setMemberStatuses(prev => [...prev, dbToMemberStatus(statusData)]);
+    } catch { /* status row can be backfilled later during renewal, same as existing renew flow */ }
+    try {
+      await supabase.from("users").update({ payment_reference_no: paymentTxnId.trim(), payment_method: paymentChoice }).eq("id", member.id);
+      setMembers(prev => prev.map(m => m.id === member.id ? { ...m, paymentReferenceNo: paymentTxnId.trim(), paymentMethod: paymentChoice } : m));
+    } catch { /* non-critical — reference number can be corrected via Edit Member later */ }
+    setPaymentSubmitting(false);
+    setMemberFormStep("success");
   };
 
   const handleImportCSV = async () => {
@@ -2253,27 +2316,28 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const approveMember = async (memberId, planId) => {
     let activatedMember = null;
     const pendingMember = members.find(m => m.id === memberId);
-    const joinDate = pendingMember?.joined || today();
-    const sameMonthCount = members.filter(m =>
-      m.status === "active" && m.joined &&
-      new Date(m.joined).getFullYear() === new Date(joinDate).getFullYear() &&
-      new Date(m.joined).getMonth() === new Date(joinDate).getMonth()
-    ).length;
-    const newMembershipId = genMembershipId(joinDate, sameMonthCount);
     try {
-      const updateData = { status: "active", membership_id: newMembershipId };
+      // membership_id is assigned once at creation and is never reissued here
+      const updateData = { status: "active", activation_status: "active" };
       if (planId) updateData.membership_plan = planId;
       const { data, error } = await supabase.from("users").update(updateData).eq("id", memberId).select().single();
       if (error) throw error;
       const mapped = dbToUser(data);
       setMembers(members.map(m => m.id === memberId ? mapped : m));
       activatedMember = mapped;
-      showToast(`Membership activated! ID: ${mapped.membershipId || newMembershipId}`);
+      showToast(`Membership activated! ID: ${mapped.membershipId || memberId}`);
+      // Flip the status-table row from Pending to Active now that the librarian has confirmed
+      if (mapped.membershipId) {
+        try {
+          await supabase.from("status").update({ status: "Active" }).eq("member_id", mapped.membershipId);
+          setMemberStatuses(prev => prev.map(s => s.memberId === mapped.membershipId ? { ...s, status: "Active" } : s));
+        } catch { /* status row may not exist yet (e.g. offline member) — safe to skip */ }
+      }
     } catch {
-      const offlineMember = { ...pendingMember, membershipId: newMembershipId, status: "active", joined: joinDate, plan: planId || null };
+      const offlineMember = { ...pendingMember, status: "active", activationStatus: "active", plan: planId || pendingMember?.plan || null };
       setMembers(members.map(m => m.id === memberId ? offlineMember : m));
       activatedMember = offlineMember;
-      showToast(`Membership activated (offline)! ID: ${newMembershipId}`);
+      showToast(`Membership activated (offline)!`);
     }
     // Fire welcome email — non-blocking, silent on failure
     if (activatedMember?.email) {
@@ -2355,7 +2419,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     setPenaltyShowQR(false);
   };
 
-  const openEditMember = (m) => { setEditMember(m); setMemberForm({ name: m.name, email: m.email, phone: m.phone || "", altPhone: m.altPhone || "", enrollmentDate: m.enrollmentDate || "", childMemberName: m.childMemberName || "", childMemberDOB: m.childMemberDOB || "", guardianName: m.guardianName || "", relationshipToMember: m.relationshipToMember || "", address: m.address || "", upiId: m.upiId || "", paymentMethod: m.paymentMethod || "", registrationFees: m.registrationFees || "", offerType: m.offerType || "", refundableDeposit: m.refundableDeposit || "", branch: m.branch || "", membershipType: m.membershipType || "annual", plan: m.plan || "", planDescription: m.planDescription || "", status: m.status, password: m.password || "", comments: m.comments || "" }); setShowMemberForm(true); };
+  const openEditMember = (m) => { setEditMember(m); setMemberForm({ name: m.name, email: m.email, phone: m.phone || "", altPhone: m.altPhone || "", enrollmentDate: m.enrollmentDate || "", childMemberName: m.childMemberName || "", childMemberDOB: m.childMemberDOB || "", guardianName: m.guardianName || "", relationshipToMember: m.relationshipToMember || "", address: m.address || "", upiId: m.upiId || "", paymentMethod: m.paymentMethod || "", registrationFees: m.registrationFees || "", offerType: m.offerType || "", refundableDeposit: m.refundableDeposit || "", branch: m.branch || "", membershipType: m.membershipType || "annual", plan: m.plan || "", planDescription: m.planDescription || "", status: m.status, password: m.password || "", comments: m.comments || "" }); setMemberFormStep("form"); setShowMemberForm(true); };
 
   // ── LIBRARIAN CRUD ──
   const saveLib = () => {
@@ -2513,6 +2577,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     return "active";
   };
   const activeMembersCount = members.filter(m => membershipStatusBucket(m) === "active").length;
+  // Shown read-only in the Add Member form's Admin section; edits never regenerate an existing ID
+  const previewMembershipId = editMember ? (editMember.membershipId || "—") : computeNextMembershipId(memberForm.enrollmentDate);
 
   return (
     <div className="dash-wrap" style={{ maxWidth: 1140, margin: "0 auto", padding: "24px 20px" }}>
@@ -2712,7 +2778,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
             </h2>
             <div style={{ display: "flex", gap: 8 }}>
               <Btn variant="outline" onClick={() => { setImportHeaders([]); setImportRows([]); setImportMapping({}); setImportResult(null); setShowImportModal(true); }}>Import CSV</Btn>
-              <Btn variant="primary" icon="plus" onClick={() => { setMemberForm(emptyMember); setEditMember(null); setShowMemberForm(true); }}>Add Member</Btn>
+              <Btn variant="primary" icon="plus" onClick={() => { setMemberForm(emptyMember); setEditMember(null); setMemberFormStep("form"); setShowMemberForm(true); }}>Add Member</Btn>
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
@@ -4083,107 +4149,206 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
       )}
 
       {/* Member form */}
-      <Modal open={showMemberForm} onClose={() => { setShowMemberForm(false); setEditMember(null); }} title={editMember ? "Edit Member" : "Add New Member"} width={560}>
-        {/* ── Member Info ── */}
-        <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>Member Info</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
-          <Input label="Full Name" value={memberForm.name} onChange={e => setMemberForm({ ...memberForm, name: e.target.value })} placeholder="Member's full name" icon="user" required />
-          <Input label="Enrollment Date" type="date" value={memberForm.enrollmentDate} onChange={e => setMemberForm({ ...memberForm, enrollmentDate: e.target.value })} />
-          <Input label="Email" type="email" value={memberForm.email} onChange={e => setMemberForm({ ...memberForm, email: e.target.value })} placeholder="email@example.com" icon="mail" required />
-          <Input label="Phone" value={memberForm.phone} onChange={e => setMemberForm({ ...memberForm, phone: e.target.value })} placeholder="+91 98765 43210" icon="phone" required />
-          <Input label="Alternate Phone" value={memberForm.altPhone} onChange={e => setMemberForm({ ...memberForm, altPhone: e.target.value })} placeholder="+91 98765 43210" icon="phone" />
-          <Input label="UPI ID" value={memberForm.upiId} onChange={e => setMemberForm({ ...memberForm, upiId: e.target.value })} placeholder="name@upi or 9876543210@paytm" hint="Used for renewal payment links" />
-        </div>
-        <div style={{ marginBottom: 14 }}>
-          <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 5, textTransform: "uppercase", letterSpacing: .5 }}>Address<span style={{ color: C.red }}> *</span></label>
-          <textarea value={memberForm.address} onChange={e => setMemberForm({ ...memberForm, address: e.target.value })} placeholder="Full address" rows={2} required
-            style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", resize: "vertical", outline: "none" }}
-            onFocus={e => e.target.style.borderColor = C.green} onBlur={e => e.target.style.borderColor = C.gray300} />
-        </div>
+      <Modal open={showMemberForm} onClose={closeMemberForm}
+        title={memberFormStep === "payment" ? "Payment" : memberFormStep === "success" ? "All Set!" : (editMember ? "Edit Member" : "Add New Member")}
+        width={memberFormStep === "form" ? 560 : 460}>
+        {memberFormStep === "form" && (
+          <>
+            {/* ── Member Info ── */}
+            <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>Member Info</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+              <Input label="Full Name" value={memberForm.name} onChange={e => setMemberForm({ ...memberForm, name: e.target.value })} placeholder="Member's full name" icon="user" required />
+              <Input label="Enrollment Date" type="date" value={memberForm.enrollmentDate} onChange={e => setMemberForm({ ...memberForm, enrollmentDate: e.target.value })} />
+              <Input label="Email" type="email" value={memberForm.email} onChange={e => setMemberForm({ ...memberForm, email: e.target.value })} placeholder="email@example.com" icon="mail" required />
+              <Input label="Phone" value={memberForm.phone} onChange={e => setMemberForm({ ...memberForm, phone: e.target.value })} placeholder="+91 98765 43210" icon="phone" required />
+              <Input label="Alternate Phone" value={memberForm.altPhone} onChange={e => setMemberForm({ ...memberForm, altPhone: e.target.value })} placeholder="+91 98765 43210" icon="phone" />
+              <Input label="UPI ID" value={memberForm.upiId} onChange={e => setMemberForm({ ...memberForm, upiId: e.target.value })} placeholder="name@upi or 9876543210@paytm" hint="Used for renewal payment links" />
+            </div>
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 5, textTransform: "uppercase", letterSpacing: .5 }}>Address<span style={{ color: C.red }}> *</span></label>
+              <textarea value={memberForm.address} onChange={e => setMemberForm({ ...memberForm, address: e.target.value })} placeholder="Full address" rows={2} required
+                style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", resize: "vertical", outline: "none" }}
+                onFocus={e => e.target.style.borderColor = C.green} onBlur={e => e.target.style.borderColor = C.gray300} />
+            </div>
 
-        {/* ── Child Member ── */}
-        <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Child Member (if applicable)</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
-          <Input label="Child Member Name" value={memberForm.childMemberName} onChange={e => setMemberForm({ ...memberForm, childMemberName: e.target.value })} placeholder="Child's full name" />
-          <Input label="Child Date of Birth" type="date" value={memberForm.childMemberDOB} onChange={e => setMemberForm({ ...memberForm, childMemberDOB: e.target.value })} />
-          <Input label="Parent / Guardian Name" value={memberForm.guardianName} onChange={e => setMemberForm({ ...memberForm, guardianName: e.target.value })} placeholder="Guardian's name" />
-          <Input label="Relationship to Member" value={memberForm.relationshipToMember} onChange={e => setMemberForm({ ...memberForm, relationshipToMember: e.target.value })} placeholder="e.g. Father, Mother" />
-        </div>
+            {/* ── Child Member ── */}
+            <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Child Member (if applicable)</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+              <Input label="Child Member Name" value={memberForm.childMemberName} onChange={e => setMemberForm({ ...memberForm, childMemberName: e.target.value })} placeholder="Child's full name" />
+              <Input label="Child Date of Birth" type="date" value={memberForm.childMemberDOB} onChange={e => setMemberForm({ ...memberForm, childMemberDOB: e.target.value })} />
+              <Input label="Parent / Guardian Name" value={memberForm.guardianName} onChange={e => setMemberForm({ ...memberForm, guardianName: e.target.value })} placeholder="Guardian's name" />
+              <Input label="Relationship to Member" value={memberForm.relationshipToMember} onChange={e => setMemberForm({ ...memberForm, relationshipToMember: e.target.value })} placeholder="e.g. Father, Mother" />
+            </div>
 
-        {/* ── Payment ── */}
-        <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Payment</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
-          <Select label="Payment Method" value={memberForm.paymentMethod} onChange={e => setMemberForm({ ...memberForm, paymentMethod: e.target.value })} options={[
-            { value: "", label: "— Select —" },
-            { value: "cash", label: "Cash" },
-            { value: "upi", label: "UPI" },
-            { value: "bank_transfer", label: "Bank Transfer" },
-            { value: "card", label: "Card" },
-            { value: "cheque", label: "Cheque" },
-          ]} />
-          <Input label="Offer Type" value={memberForm.offerType} onChange={e => setMemberForm({ ...memberForm, offerType: e.target.value })} placeholder="e.g. Referral, Festival" />
-          <Input label="One-time Registration Fee (₹)" type="number" value={memberForm.registrationFees} onChange={e => setMemberForm({ ...memberForm, registrationFees: e.target.value })} placeholder="0" />
-          <Input label="Refundable Deposit (₹)" type="number" value={memberForm.refundableDeposit} onChange={e => setMemberForm({ ...memberForm, refundableDeposit: e.target.value })} placeholder="0" />
-        </div>
+            {/* ── Payment ── */}
+            <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Payment</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+              <Select label="Payment Method" value={memberForm.paymentMethod} onChange={e => setMemberForm({ ...memberForm, paymentMethod: e.target.value })} options={[
+                { value: "", label: "— Select —" },
+                { value: "cash", label: "Cash" },
+                { value: "upi", label: "UPI" },
+                { value: "bank_transfer", label: "Bank Transfer" },
+                { value: "card", label: "Card" },
+                { value: "cheque", label: "Cheque" },
+              ]} />
+              <Input label="Offer Type" value={memberForm.offerType} onChange={e => setMemberForm({ ...memberForm, offerType: e.target.value })} placeholder="e.g. Referral, Festival" />
+              <Input label="One-time Registration Fee (₹)" type="number" value={memberForm.registrationFees} onChange={e => setMemberForm({ ...memberForm, registrationFees: e.target.value })} placeholder="0" />
+              <Input label="Refundable Deposit (₹)" type="number" value={memberForm.refundableDeposit} onChange={e => setMemberForm({ ...memberForm, refundableDeposit: e.target.value })} placeholder="0" />
+            </div>
 
-        {/* ── Membership ── */}
-        <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Membership</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
-          <Select label="Membership Plan" required value={memberForm.plan} onChange={e => {
-            const planId = e.target.value;
-            const chosenPlan = (settings.plans || DEFAULT_PLANS).find(p => p.id === planId);
-            setMemberForm({
-              ...memberForm, plan: planId,
-              refundableDeposit: chosenPlan ? String(chosenPlan.refundableDeposit || 0) : memberForm.refundableDeposit,
-              planDescription: chosenPlan
-                ? (chosenPlan.inhouseOnly ? `${chosenPlan.name} — walk-in, no borrowing` : `${chosenPlan.name} — Borrow up to ${chosenPlan.borrowLimit} book${chosenPlan.borrowLimit !== 1 ? "s" : ""} · ₹${chosenPlan.cost}/month subscription`)
-                : memberForm.planDescription,
-              membershipType: chosenPlan ? (chosenPlan.inhouseOnly ? "inhouse" : "monthly") : memberForm.membershipType,
-            });
-          }} options={[
-            { value: "", label: "— Select a plan —" },
-            ...(settings.plans || DEFAULT_PLANS).map(p => ({ value: p.id, label: p.inhouseOnly ? `${p.name} (walk-in)` : `${p.name} (${p.borrowLimit} books · ₹${p.cost}/mo)` })),
-          ]} />
-          <Select label="Membership Type" value={memberForm.membershipType} onChange={e => setMemberForm({ ...memberForm, membershipType: e.target.value })} options={[
-            { value: "monthly",     label: "Monthly" },
-            { value: "quarterly",   label: "Quarterly" },
-            { value: "halfyearly",  label: "Half-Yearly" },
-            { value: "annual",      label: "Annual" },
-            { value: "inhouse",     label: "In-Library (Inhouse)" },
-          ]} />
-        </div>
-        <div style={{ marginBottom: 14 }}>
-          <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 5, textTransform: "uppercase", letterSpacing: .5 }}>Membership Plan Description</label>
-          <textarea value={memberForm.planDescription} onChange={e => setMemberForm({ ...memberForm, planDescription: e.target.value })} placeholder="Optional description of the plan" rows={2}
-            style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", resize: "vertical", outline: "none" }}
-            onFocus={e => e.target.style.borderColor = C.green} onBlur={e => e.target.style.borderColor = C.gray300} />
-        </div>
+            {/* ── Membership ── */}
+            <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Membership</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+              <Select label="Membership Plan" required value={memberForm.plan} onChange={e => {
+                const planId = e.target.value;
+                const chosenPlan = (settings.plans || DEFAULT_PLANS).find(p => p.id === planId);
+                setMemberForm({
+                  ...memberForm, plan: planId,
+                  refundableDeposit: chosenPlan ? String(chosenPlan.refundableDeposit || 0) : memberForm.refundableDeposit,
+                  planDescription: chosenPlan
+                    ? (chosenPlan.inhouseOnly ? `${chosenPlan.name} — walk-in, no borrowing` : `${chosenPlan.name} — Borrow up to ${chosenPlan.borrowLimit} book${chosenPlan.borrowLimit !== 1 ? "s" : ""} · ₹${chosenPlan.cost}/month subscription`)
+                    : memberForm.planDescription,
+                  membershipType: chosenPlan ? (chosenPlan.inhouseOnly ? "inhouse" : "monthly") : memberForm.membershipType,
+                });
+              }} options={[
+                { value: "", label: "— Select a plan —" },
+                ...(settings.plans || DEFAULT_PLANS).map(p => ({ value: p.id, label: p.inhouseOnly ? `${p.name} (walk-in)` : `${p.name} (${p.borrowLimit} books · ₹${p.cost}/mo)` })),
+              ]} />
+              <Select label="Membership Type" value={memberForm.membershipType} onChange={e => setMemberForm({ ...memberForm, membershipType: e.target.value })} options={[
+                { value: "monthly",     label: "Monthly" },
+                { value: "quarterly",   label: "Quarterly" },
+                { value: "halfyearly",  label: "Half-Yearly" },
+                { value: "annual",      label: "Annual" },
+                { value: "inhouse",     label: "In-Library (Inhouse)" },
+              ]} />
+            </div>
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 5, textTransform: "uppercase", letterSpacing: .5 }}>Membership Plan Description</label>
+              <textarea value={memberForm.planDescription} onChange={e => setMemberForm({ ...memberForm, planDescription: e.target.value })} placeholder="Optional description of the plan" rows={2}
+                style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", resize: "vertical", outline: "none" }}
+                onFocus={e => e.target.style.borderColor = C.green} onBlur={e => e.target.style.borderColor = C.gray300} />
+            </div>
 
-        {/* ── Admin ── */}
-        <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Admin</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
-          <Select label="Branch" value={memberForm.branch} onChange={e => setMemberForm({ ...memberForm, branch: e.target.value })} options={[
-            { value: "", label: "— Select branch —" },
-            ...branches.map(b => ({ value: b.id, label: b.name })),
-          ]} />
-          <Select label="Status" value={memberForm.status} onChange={e => setMemberForm({ ...memberForm, status: e.target.value })} options={[
-            { value: "active",    label: "Active"    },
-            { value: "pending",   label: "Pending"   },
-            { value: "suspended", label: "Suspended" },
-          ]} />
-          <Input label="Password" type="password" value={memberForm.password} onChange={e => setMemberForm({ ...memberForm, password: e.target.value })} placeholder="Set login password" icon="lock" hint="Leave blank to auto-generate" />
-        </div>
-        <div style={{ marginBottom: 14 }}>
-          <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 5, textTransform: "uppercase", letterSpacing: .5 }}>Comments</label>
-          <textarea value={memberForm.comments} onChange={e => setMemberForm({ ...memberForm, comments: e.target.value })} placeholder="Any additional notes or remarks" rows={2}
-            style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", resize: "vertical", outline: "none" }}
-            onFocus={e => e.target.style.borderColor = C.green} onBlur={e => e.target.style.borderColor = C.gray300} />
-        </div>
+            {/* ── Admin ── */}
+            <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Admin</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+              <Select label="Branch" value={memberForm.branch} onChange={e => setMemberForm({ ...memberForm, branch: e.target.value })} options={[
+                { value: "", label: "— Select branch —" },
+                ...branches.map(b => ({ value: b.id, label: b.name })),
+              ]} />
+              <Select label="Status" value={memberForm.status} onChange={e => setMemberForm({ ...memberForm, status: e.target.value })} options={[
+                { value: "active",    label: "Active"    },
+                { value: "pending",   label: "Pending"   },
+                { value: "suspended", label: "Suspended" },
+              ]} />
+              <Input label="Password" type="password" value={memberForm.password} onChange={e => setMemberForm({ ...memberForm, password: e.target.value })} placeholder="Set login password" icon="lock" hint="Leave blank to auto-generate" />
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 5, textTransform: "uppercase", letterSpacing: .5 }}>Member ID</label>
+                <div style={{ padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray200}`, background: C.gray50, fontSize: 14, fontFamily: "monospace", fontWeight: 700, color: C.green }}>
+                  {previewMembershipId}
+                </div>
+              </div>
+            </div>
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 5, textTransform: "uppercase", letterSpacing: .5 }}>Comments</label>
+              <textarea value={memberForm.comments} onChange={e => setMemberForm({ ...memberForm, comments: e.target.value })} placeholder="Any additional notes or remarks" rows={2}
+                style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", resize: "vertical", outline: "none" }}
+                onFocus={e => e.target.style.borderColor = C.green} onBlur={e => e.target.style.borderColor = C.gray300} />
+            </div>
 
-        <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
-          <Btn onClick={saveMember} variant="primary">{editMember ? "Save Changes" : "Create Member"}</Btn>
-          <Btn onClick={() => { setShowMemberForm(false); setEditMember(null); }} variant="ghost">Cancel</Btn>
-        </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+              <Btn onClick={saveMember} variant="primary">{editMember ? "Save Changes" : "Create Member"}</Btn>
+              <Btn onClick={closeMemberForm} variant="ghost">Cancel</Btn>
+            </div>
+          </>
+        )}
+
+        {memberFormStep === "payment" && createdMember && (() => {
+          const plan = resolvePlan(createdMember.plan);
+          const registrationFee = parseFloat(memberForm.registrationFees) || 0;
+          const depositFee = parseFloat(memberForm.refundableDeposit) || 0;
+          const subscriptionFee = plan?.cost || 0;
+          const total = registrationFee + depositFee + subscriptionFee;
+          const libraryUpi = localSettings.library?.upiId || settings.library?.upiId || "";
+          const libName = localSettings.library?.name || settings.library?.name || "Library";
+          const upiLink = libraryUpi && total > 0
+            ? `upi://pay?pa=${encodeURIComponent(libraryUpi)}&pn=${encodeURIComponent(libName)}&am=${total}&tn=${encodeURIComponent("Arivagam Subscription")}&cu=INR`
+            : null;
+          const qrSrc = upiLink
+            ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(upiLink)}&margin=6&color=1B4332`
+            : null;
+          return (
+            <div>
+              <div style={{ background: C.blueLight, border: `1px solid ${C.blue}30`, borderRadius: 10, padding: "12px 16px", marginBottom: 16 }}>
+                <div style={{ fontWeight: 700, fontSize: 14, color: C.green }}>{createdMember.name}</div>
+                <div style={{ fontSize: 12, color: C.gray600, marginTop: 2 }}>Member ID: <strong style={{ fontFamily: "monospace" }}>{createdMember.membershipId}</strong></div>
+              </div>
+
+              <div style={{ background: C.gray50, borderRadius: 10, padding: "14px 16px", marginBottom: 16, border: `1px solid ${C.gray100}` }}>
+                <div style={{ fontSize: 12, color: C.gray600, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>Amount Due</div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "6px 0" }}>
+                  <span>Registration Fee</span><span style={{ fontWeight: 700 }}>₹{registrationFee.toLocaleString()}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "6px 0", borderTop: `1px solid ${C.gray100}` }}>
+                  <span>Refundable Deposit</span><span style={{ fontWeight: 700 }}>₹{depositFee.toLocaleString()}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "6px 0", borderTop: `1px solid ${C.gray100}` }}>
+                  <span>{plan?.name || "Subscription"} — 1st month</span><span style={{ fontWeight: 700 }}>₹{subscriptionFee.toLocaleString()}</span>
+                </div>
+                <div style={{ borderTop: `2px solid ${C.gray300}`, marginTop: 8, paddingTop: 8, display: "flex", justifyContent: "space-between", fontWeight: 800, fontSize: 17 }}>
+                  <span>Total</span><span style={{ color: C.green }}>₹{total.toLocaleString()}</span>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 16, marginBottom: 16 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}>
+                  <input type="radio" name="new-member-paymethod" value="cash" checked={paymentChoice === "cash"} onChange={() => setPaymentChoice("cash")} style={{ accentColor: C.green }} />
+                  Pay by Cash
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}>
+                  <input type="radio" name="new-member-paymethod" value="upi" checked={paymentChoice === "upi"} onChange={() => setPaymentChoice("upi")} style={{ accentColor: C.green }} />
+                  Pay by UPI
+                </label>
+              </div>
+
+              {paymentChoice === "upi" && (
+                <div style={{ textAlign: "center", marginBottom: 16 }}>
+                  {qrSrc ? (
+                    <>
+                      <div style={{ background: C.white, border: `2px solid ${C.green}`, borderRadius: 14, padding: 10, display: "inline-block", boxShadow: "0 4px 16px rgba(0,0,0,.1)" }}>
+                        <img src={qrSrc} alt="UPI QR Code" width={180} height={180} style={{ display: "block", borderRadius: 8 }} />
+                      </div>
+                      <div style={{ marginTop: 10, fontSize: 14, fontWeight: 800, color: C.green }}>Scan &amp; Pay ₹{total.toLocaleString()}</div>
+                      <a href={upiLink} style={{ display: "inline-flex", marginTop: 8, alignItems: "center", gap: 6, padding: "8px 16px", background: C.green, color: C.white, borderRadius: 8, fontWeight: 700, fontSize: 13, textDecoration: "none" }}>Open in UPI App</a>
+                    </>
+                  ) : (
+                    <div style={{ background: C.gray50, border: `1.5px dashed ${C.gray300}`, borderRadius: 12, padding: "20px" }}>
+                      <div style={{ fontSize: 13, color: C.gray600 }}>Library UPI not configured. Go to Fee Settings → UPI &amp; Renewal Reminders.</div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <Input label="Transaction ID / Reference No." value={paymentTxnId} onChange={e => setPaymentTxnId(e.target.value)} placeholder="Enter after payment is complete" required />
+
+              <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+                <Btn onClick={() => submitMemberPayment({ member: createdMember, plan, registrationFee, depositFee, subscriptionFee })} variant="primary" icon="check" disabled={!paymentTxnId.trim() || paymentSubmitting}>
+                  {paymentSubmitting ? "Submitting…" : "Submit"}
+                </Btn>
+              </div>
+            </div>
+          );
+        })()}
+
+        {memberFormStep === "success" && createdMember && (
+          <div style={{ textAlign: "center", padding: "20px 0" }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>🎉</div>
+            <p style={{ fontSize: 15, color: C.gray900, lineHeight: 1.6 }}>
+              Congratulations <strong style={{ color: C.green }}>{createdMember.name}</strong>!! You are all set, your membership will be activated by Librarian. Enjoy your Reading!
+            </p>
+            <Btn onClick={closeMemberForm} variant="primary" style={{ marginTop: 12 }}>Done</Btn>
+          </div>
+        )}
       </Modal>
 
       {/* Librarian form */}
@@ -4993,7 +5158,7 @@ export default function App() {
           requests={requests} setRequests={setRequests}
           bookCopies={bookCopies} setBookCopies={setBookCopies}
           waitlist={waitlist} setWaitlist={setWaitlist}
-          payments={payments} memberStatuses={memberStatuses} setMemberStatuses={setMemberStatuses}
+          payments={payments} setPayments={setPayments} memberStatuses={memberStatuses} setMemberStatuses={setMemberStatuses}
           settings={settings} onSettings={setSettings}
           isAdmin={false}
         />
@@ -5009,7 +5174,7 @@ export default function App() {
           requests={requests} setRequests={setRequests}
           bookCopies={bookCopies} setBookCopies={setBookCopies}
           waitlist={waitlist} setWaitlist={setWaitlist}
-          payments={payments} memberStatuses={memberStatuses} setMemberStatuses={setMemberStatuses}
+          payments={payments} setPayments={setPayments} memberStatuses={memberStatuses} setMemberStatuses={setMemberStatuses}
           settings={settings} onSettings={setSettings}
           isAdmin={true}
         />
