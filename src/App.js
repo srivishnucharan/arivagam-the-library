@@ -2980,20 +2980,22 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                   {mPayments.length === 0 ? (
                     <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 10, padding: "24px", textAlign: "center", color: C.gray600, fontSize: 13 }}>No payment history yet.</div>
                   ) : (
-                    <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 10, overflow: "hidden" }}>
-                      {mPayments.map((p, i) => (
-                        <div key={p.id} style={{ display: "flex", gap: 12, padding: "12px 16px", borderTop: i > 0 ? `1px solid ${C.gray100}` : "none", alignItems: "center" }}>
-                          <div style={{ width: 40, height: 40, borderRadius: "50%", background: C.green + "15", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                            <Icon name="rupee" size={18} color={C.green} />
-                          </div>
-                          <div style={{ flex: 1 }}>
-                            <div style={{ fontWeight: 700, color: C.green, fontSize: 14 }}>₹{p.amountPaid.toLocaleString()} · {p.paymentMethod || "—"}</div>
-                            <div style={{ fontSize: 12, color: C.gray600, marginTop: 2 }}>{p.bookPlan || "—"}{p.paymentType && ` · ${p.paymentType}`}</div>
-                            <div style={{ fontSize: 11, color: C.gray600, marginTop: 2 }}>Paid: {p.date || "—"}</div>
-                          </div>
-                          <Badge label={`Next: ${p.nextFeeMonth || "—"}`} color={C.blue} />
+                    <div className="revenue-tbl-scroll">
+                      <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 10, overflow: "hidden" }}>
+                        <div className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr 1fr 1fr 1fr 1fr", padding: "10px 16px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase" }}>
+                          <span>Date</span><span>Plan</span><span>Amount</span><span>Method</span><span>Type</span><span>Next Fee Month</span>
                         </div>
-                      ))}
+                        {mPayments.map((p, i) => (
+                          <div key={p.id} className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr 1fr 1fr 1fr 1fr", padding: "12px 16px", borderTop: `1px solid ${C.gray100}`, alignItems: "center", background: i % 2 === 0 ? C.white : C.gray50 }}>
+                            <span style={{ fontSize: 13, color: C.gray700 }}>{p.date || "—"}</span>
+                            <span style={{ fontSize: 13, color: C.gray700 }}>{p.bookPlan || "—"}</span>
+                            <span style={{ fontSize: 14, fontWeight: 700, color: C.greenMid }}>₹{p.amountPaid.toLocaleString()}</span>
+                            <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentMethod || "—"}</span>
+                            <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentType || "—"}</span>
+                            <span style={{ fontSize: 13, color: C.gray700 }}>{p.nextFeeMonth || "—"}</span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>
