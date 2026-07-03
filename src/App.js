@@ -726,10 +726,9 @@ const TopNav = ({ user, onLogout, onNavigate, currentPage, settings }) => {
           .members-tbl-row > div:nth-child(5) { flex: 0 0 100%; margin-top: 6px; }
         }
 
-        /* A-Z rail: vertical column on desktop → sticky horizontal strip on mobile (stays reachable over a long list) */
+        /* A-Z rail (Books tab): vertical column on desktop → sticky horizontal strip on mobile */
         @media (max-width: 640px) {
-          .books-tbl-scroll-wrap,
-          .members-tbl-scroll-wrap { flex-direction: column !important; }
+          .books-tbl-scroll-wrap { flex-direction: column !important; }
           .az-scroll-rail {
             position: sticky !important; top: 60px !important; left: auto !important; transform: none !important;
             flex-direction: row !important; overflow-x: auto; overflow-y: visible !important; max-height: none !important;
@@ -2683,16 +2682,6 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         const sortedMembers = [...members].sort((a, b) => String(a.membershipId || a.id).localeCompare(String(b.membershipId || b.id)));
         const filteredMembers = sortedMembers.filter(m => (!memberFilter || m.status === memberFilter)
           && (!q || [m.name, m.email, m.phone, m.membershipId, m.id].filter(Boolean).some(v => String(v).toLowerCase().includes(q))));
-        // Members are sorted by ID, but the A-Z rail still jumps by first name letter (same UX as the Books tab)
-        const AZ = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
-        const letterFirstIndex = {};
-        filteredMembers.forEach((m, i) => {
-          const letter = (m.name || "").trim().charAt(0).toUpperCase();
-          if (AZ.includes(letter) && letterFirstIndex[letter] === undefined) letterFirstIndex[letter] = i;
-        });
-        const scrollToLetter = (letter) => {
-          document.getElementById(`member-row-${letter}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
-        };
         return (
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 10 }}>
@@ -2717,86 +2706,68 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
               onFocus={e => e.target.style.borderColor = C.green} onBlur={e => e.target.style.borderColor = C.gray300} />
             <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }}><Icon name="search" size={14} color={C.gray300} /></span>
           </div>
-          <div className="members-tbl-scroll-wrap" style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-            {/* A-Z quick scroll — sticky just under the top nav, so it stays reachable while scrolling a long member list */}
-            <div className="az-scroll-rail" style={{ position: "sticky", top: 68, maxHeight: "calc(100vh - 84px)", overflowY: "auto", display: "flex", flexDirection: "column", gap: 1, background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 10, padding: "6px 3px", flexShrink: 0, boxShadow: "0 2px 8px rgba(0,0,0,.08)", zIndex: 40 }}>
-              {AZ.map(letter => {
-                const has = letterFirstIndex[letter] !== undefined;
-                return (
-                  <button key={letter} onClick={() => has && scrollToLetter(letter)} disabled={!has}
-                    style={{ width: 22, height: 18, border: "none", background: "none", borderRadius: 4, fontSize: 10, fontWeight: 700, fontFamily: "inherit", color: has ? C.green : C.gray200, cursor: has ? "pointer" : "default" }}
-                    onMouseEnter={e => { if (has) e.currentTarget.style.background = C.green + "18"; }}
-                    onMouseLeave={e => { e.currentTarget.style.background = "none"; }}>
-                    {letter}
-                  </button>
-                );
-              })}
+          <div className="members-tbl-container" style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 12, overflowX: "hidden", overflowY: "auto", maxHeight: "70vh" }}>
+            {/* Header */}
+            <div className="members-tbl-head" style={{ display: "grid", gridTemplateColumns: "1.6fr 1.6fr 1fr 100px 190px", gap: 10, padding: "10px 16px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5, position: "sticky", top: 0, zIndex: 1 }}>
+              <span>Member</span><span>Contact</span><span>Plan / Joined</span><span>Activation Status</span><span>Actions</span>
             </div>
-            <div className="members-tbl-container" style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 12, overflowX: "hidden", overflowY: "auto", maxHeight: "70vh", flex: 1, minWidth: 0 }}>
-              {/* Header */}
-              <div className="members-tbl-head" style={{ display: "grid", gridTemplateColumns: "1.6fr 1.6fr 1fr 100px 190px", gap: 10, padding: "10px 16px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5, position: "sticky", top: 0, zIndex: 1 }}>
-                <span>Member</span><span>Contact</span><span>Joined / Plan</span><span>Status</span><span>Actions</span>
-              </div>
-              {filteredMembers.length === 0 && (
-                <div style={{ padding: "32px 18px", textAlign: "center", color: C.gray600, fontSize: 13 }}>No members match your search.</div>
-              )}
-              {filteredMembers.map((m, i) => {
-                const plan = resolvePlan(m.plan);
-                const letter = (m.name || "").trim().charAt(0).toUpperCase();
-                const rowId = letterFirstIndex[letter] === i ? `member-row-${letter}` : undefined;
-                return (
-                  <div key={m.id} id={rowId} style={{ borderTop: i > 0 ? `1px solid ${C.gray100}` : "none", scrollMarginTop: 12 }}>
-                    <div className="members-tbl-row" onClick={() => setSelectedMember(m)}
-                      style={{ display: "grid", gridTemplateColumns: "1.6fr 1.6fr 1fr 100px 190px", gap: 10, padding: "12px 16px", alignItems: "center", background: m.status === "pending" ? C.goldLight + "55" : i % 2 === 0 ? C.white : C.gray50, cursor: "pointer", transition: "background .12s" }}
-                      onMouseEnter={e => e.currentTarget.style.background = C.green + "0a"}
-                      onMouseLeave={e => e.currentTarget.style.background = m.status === "pending" ? C.goldLight + "55" : i % 2 === 0 ? C.white : C.gray50}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-                        <div style={{ width: 36, height: 36, background: m.status === "active" ? C.green + "20" : C.orange + "20", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                          <Icon name="user" size={16} color={m.status === "active" ? C.green : C.orange} />
-                        </div>
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontWeight: 700, color: C.green, fontSize: 13, fontFamily: "monospace" }}>{m.membershipId || m.id}</div>
-                          <div style={{ fontSize: 12, color: C.gray600 }}>{m.name}</div>
-                        </div>
+            {filteredMembers.length === 0 && (
+              <div style={{ padding: "32px 18px", textAlign: "center", color: C.gray600, fontSize: 13 }}>No members match your search.</div>
+            )}
+            {filteredMembers.map((m, i) => {
+              const plan = resolvePlan(m.plan);
+              return (
+                <div key={m.id} style={{ borderTop: i > 0 ? `1px solid ${C.gray100}` : "none" }}>
+                  <div className="members-tbl-row" onClick={() => setSelectedMember(m)}
+                    style={{ display: "grid", gridTemplateColumns: "1.6fr 1.6fr 1fr 100px 190px", gap: 10, padding: "12px 16px", alignItems: "center", background: m.status === "pending" ? C.goldLight + "55" : i % 2 === 0 ? C.white : C.gray50, cursor: "pointer", transition: "background .12s" }}
+                    onMouseEnter={e => e.currentTarget.style.background = C.green + "0a"}
+                    onMouseLeave={e => e.currentTarget.style.background = m.status === "pending" ? C.goldLight + "55" : i % 2 === 0 ? C.white : C.gray50}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                      <div style={{ width: 36, height: 36, background: m.status === "active" ? C.green + "20" : C.orange + "20", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                        <Icon name="user" size={16} color={m.status === "active" ? C.green : C.orange} />
                       </div>
-                      <div style={{ fontSize: 12, color: C.gray600, minWidth: 0, wordBreak: "break-word" }}>{m.email}{m.phone && <><br />{m.phone}</>}</div>
-                      <div style={{ fontSize: 12, color: C.gray600 }}>
-                        {m.joined}
-                        {plan && <div style={{ color: C.blue, fontWeight: 600 }}>{plan.name}</div>}
-                      </div>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                        <Badge label={m.status} color={m.status === "active" ? C.greenMid : m.status === "pending" ? C.orange : C.red} />
-                        {m.fees > 0 && <Badge label={`₹${m.fees} due`} color={C.red} />}
-                      </div>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }} onClick={e => e.stopPropagation()}>
-                        {m.status === "pending" && (
-                          <Btn size="sm" variant="secondary" icon="check" onClick={() => { setActivateModal({ member: m }); setActivatePlanId((settings.plans || DEFAULT_PLANS)[0]?.id || ""); }}>Activate</Btn>
-                        )}
-                        <button onClick={() => openEditMember(m)} style={{ background: C.blueLight, border: "none", cursor: "pointer", padding: "6px 9px", borderRadius: 6 }} title="Edit"><Icon name="edit" size={13} color={C.blue} /></button>
-                        {isAdmin && (
-                          <button onClick={() => deleteMember(m.id)} style={{ background: C.redLight, border: "none", cursor: "pointer", padding: "6px 9px", borderRadius: 6 }} title="Delete"><Icon name="trash" size={13} color={C.red} /></button>
-                        )}
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 700, color: C.green, fontSize: 13, fontFamily: "monospace" }}>{m.membershipId || m.id}</div>
+                        <div style={{ fontSize: 12, color: C.gray600 }}>{m.name}</div>
                       </div>
                     </div>
-                    {/* ── Renewal Request Banner ── */}
-                    {m.renewalRequestedAt && (
-                      <div onClick={e => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 10, background: "linear-gradient(135deg,#fff7e6,#ffe4b3)", borderTop: "2px solid #E67E22", padding: "10px 16px", boxShadow: "0 2px 12px rgba(230,126,34,.15)", animation: "pulse 2s infinite" }}>
-                        <div style={{ fontSize: 22, flexShrink: 0 }}>💰</div>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 12, fontWeight: 800, color: "#B7611A", lineHeight: 1.2 }}>Membership Fee Paid</div>
-                          <div style={{ fontSize: 11, color: "#7D4E1A", marginTop: 2 }}>Review &amp; Renew</div>
-                        </div>
-                        <button
-                          onClick={() => setRenewModal({ member: m, plan: resolvePlan(m.plan) })}
-                          style={{ background: "#E67E22", color: "#fff", border: "none", borderRadius: 6, padding: "5px 10px", fontSize: 11, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
-                          Renew Now
-                        </button>
-                      </div>
-                    )}
+                    <div style={{ fontSize: 12, color: C.gray600, minWidth: 0, wordBreak: "break-word" }}>{m.email}{m.phone && <><br />{m.phone}</>}</div>
+                    <div style={{ fontSize: 12, color: C.gray600 }}>
+                      {plan && <div style={{ color: C.blue, fontWeight: 600 }}>{plan.name}</div>}
+                      {m.joined}
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                      <Badge label={m.status} color={m.status === "active" ? C.greenMid : m.status === "pending" ? C.orange : C.red} />
+                      {m.fees > 0 && <Badge label={`₹${m.fees} due`} color={C.red} />}
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }} onClick={e => e.stopPropagation()}>
+                      {m.status === "pending" && (
+                        <Btn size="sm" variant="secondary" icon="check" onClick={() => { setActivateModal({ member: m }); setActivatePlanId((settings.plans || DEFAULT_PLANS)[0]?.id || ""); }}>Activate</Btn>
+                      )}
+                      <button onClick={() => openEditMember(m)} style={{ background: C.blueLight, border: "none", cursor: "pointer", padding: "6px 9px", borderRadius: 6 }} title="Edit"><Icon name="edit" size={13} color={C.blue} /></button>
+                      {isAdmin && (
+                        <button onClick={() => deleteMember(m.id)} style={{ background: C.redLight, border: "none", cursor: "pointer", padding: "6px 9px", borderRadius: 6 }} title="Delete"><Icon name="trash" size={13} color={C.red} /></button>
+                      )}
+                    </div>
                   </div>
-                );
-              })}
-            </div>
+                  {/* ── Renewal Request Banner ── */}
+                  {m.renewalRequestedAt && (
+                    <div onClick={e => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 10, background: "linear-gradient(135deg,#fff7e6,#ffe4b3)", borderTop: "2px solid #E67E22", padding: "10px 16px", boxShadow: "0 2px 12px rgba(230,126,34,.15)", animation: "pulse 2s infinite" }}>
+                      <div style={{ fontSize: 22, flexShrink: 0 }}>💰</div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 12, fontWeight: 800, color: "#B7611A", lineHeight: 1.2 }}>Membership Fee Paid</div>
+                        <div style={{ fontSize: 11, color: "#7D4E1A", marginTop: 2 }}>Review &amp; Renew</div>
+                      </div>
+                      <button
+                        onClick={() => setRenewModal({ member: m, plan: resolvePlan(m.plan) })}
+                        style={{ background: "#E67E22", color: "#fff", border: "none", borderRadius: 6, padding: "5px 10px", fontSize: 11, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+                        Renew Now
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
         );
