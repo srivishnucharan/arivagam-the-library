@@ -1805,6 +1805,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const [paymentMonthFilter, setPaymentMonthFilter] = useState("");
   const [renewalFilter, setRenewalFilter] = useState(null); // null | "overdue" | "pending"
   const [memberFilter, setMemberFilter] = useState(null); // null | "pending"
+  const [memberStatusTab, setMemberStatusTab] = useState("active"); // "active" | "paused" | "closed" | "inlibrary"
   const [showBookForm, setShowBookForm] = useState(false);
   const [editBook, setEditBook] = useState(null);
   const [expandedBookId, setExpandedBookId] = useState(null);
@@ -2681,8 +2682,33 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       {tab === "members" && !selectedMember && (() => {
         const q = memberSearch.trim().toLowerCase();
         const sortedMembers = [...members].sort((a, b) => String(a.membershipId || a.id).localeCompare(String(b.membershipId || b.id)));
-        const filteredMembers = sortedMembers.filter(m => (!memberFilter || m.status === memberFilter)
+        // Membership Status bucket comes from the status table lookup; anything besides Paused/Closed counts as Active
+        const membershipStatusBucket = (m) => {
+          const statusRow = (memberStatuses || []).find(s => s.memberId === (m.membershipId || m.id));
+          const status = (statusRow?.status || "").trim();
+          if (/^paused/i.test(status)) return "paused";
+          if (/^closed/i.test(status)) return "closed";
+          return "active";
+        };
+        const statusTabCounts = { active: 0, paused: 0, closed: 0 };
+        members.forEach(m => { statusTabCounts[membershipStatusBucket(m)]++; });
+        const inLibraryCount = members.filter(m => m.membershipType === "inhouse").length;
+        const statusTabs = [
+          { id: "active",    label: "Active Members", count: statusTabCounts.active },
+          { id: "paused",    label: "Paused",         count: statusTabCounts.paused },
+          { id: "closed",    label: "Closed",         count: statusTabCounts.closed },
+          { id: "inlibrary", label: "InLibrary",       count: inLibraryCount },
+        ];
+        const tabFilteredMembers = sortedMembers.filter(m => memberStatusTab === "inlibrary"
+          ? m.membershipType === "inhouse"
+          : membershipStatusBucket(m) === memberStatusTab);
+        const filteredMembers = tabFilteredMembers.filter(m => (!memberFilter || m.status === memberFilter)
           && (!q || [m.name, m.email, m.phone, m.membershipId, m.id].filter(Boolean).some(v => String(v).toLowerCase().includes(q))));
+        const pillStyle = (active) => ({
+          background: active ? C.green : C.white, color: active ? C.white : C.gray600,
+          border: `1px solid ${active ? C.green : C.gray200}`, borderRadius: 20, padding: "7px 16px",
+          fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
+        });
         return (
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 10 }}>
@@ -2693,6 +2719,11 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
               <Btn variant="outline" onClick={() => { setImportHeaders([]); setImportRows([]); setImportMapping({}); setImportResult(null); setShowImportModal(true); }}>Import CSV</Btn>
               <Btn variant="primary" icon="plus" onClick={() => { setMemberForm(emptyMember); setEditMember(null); setShowMemberForm(true); }}>Add Member</Btn>
             </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+            {statusTabs.map(t => (
+              <button key={t.id} style={pillStyle(memberStatusTab === t.id)} onClick={() => setMemberStatusTab(t.id)}>{t.label} ({t.count})</button>
+            ))}
           </div>
           {memberFilter && (
             <div style={{ marginBottom: 14 }}>
