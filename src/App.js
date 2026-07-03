@@ -2781,6 +2781,28 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         const activeLoans = mTxns.filter(t => !t.returnDate);
         const history = mTxns.filter(t => t.returnDate);
 const mRequests = (requests || []).filter(r => r.memberId === m.id);
+        // Activation status comes from the `status` table (kept separate from the member's own record)
+        const statusRow = (memberStatuses || []).find(s => s.memberId === (m.membershipId || m.id));
+        const activationStatus = (statusRow?.status || m.status || "").trim();
+        // Payments sorted by Next Fee Month, descending. Handles both parseable dates and "MMM-YY" labels.
+        const parseMonthKey = (str) => {
+          if (!str) return -Infinity;
+          const direct = new Date(str);
+          if (!isNaN(direct)) return direct.getTime();
+          const match = String(str).trim().match(/^([A-Za-z]{3,})[\s-]?(\d{2,4})$/);
+          if (match) {
+            const months = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+            const mi = months.indexOf(match[1].slice(0, 3).toLowerCase());
+            if (mi >= 0) {
+              let yr = parseInt(match[2], 10);
+              if (yr < 100) yr += 2000;
+              return new Date(yr, mi, 1).getTime();
+            }
+          }
+          return -Infinity;
+        };
+        const mPayments = (payments || []).filter(p => p.memberId === (m.membershipId || m.id))
+          .slice().sort((a, b) => parseMonthKey(b.nextFeeMonth) - parseMonthKey(a.nextFeeMonth));
         return (
           <div>
             {/* Back button */}
@@ -2816,7 +2838,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                   ))}
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", fontSize: 13 }}>
                     <span style={{ color: C.gray600, fontWeight: 600 }}>Status</span>
-                    <Badge label={m.status} color={m.status === "active" ? C.greenMid : m.status === "pending" ? C.orange : C.red} />
+                    <Badge label={activationStatus || "—"} color={activationStatus.toLowerCase() === "active" ? C.greenMid : activationStatus.toLowerCase() === "pending" ? C.orange : C.red} />
                   </div>
                   {(() => {
                     const membershipFee   = plan?.cost || 0;
@@ -2948,6 +2970,30 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                           </div>
                         );
                       })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Payment History */}
+                <div style={{ marginTop: 24 }}>
+                  <h3 style={{ margin: "0 0 12px", color: C.gray900, fontSize: 15, fontWeight: 700 }}>Payment History ({mPayments.length})</h3>
+                  {mPayments.length === 0 ? (
+                    <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 10, padding: "24px", textAlign: "center", color: C.gray600, fontSize: 13 }}>No payment history yet.</div>
+                  ) : (
+                    <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 10, overflow: "hidden" }}>
+                      {mPayments.map((p, i) => (
+                        <div key={p.id} style={{ display: "flex", gap: 12, padding: "12px 16px", borderTop: i > 0 ? `1px solid ${C.gray100}` : "none", alignItems: "center" }}>
+                          <div style={{ width: 40, height: 40, borderRadius: "50%", background: C.green + "15", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                            <Icon name="rupee" size={18} color={C.green} />
+                          </div>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontWeight: 700, color: C.green, fontSize: 14 }}>₹{p.amountPaid.toLocaleString()} · {p.paymentMethod || "—"}</div>
+                            <div style={{ fontSize: 12, color: C.gray600, marginTop: 2 }}>{p.bookPlan || "—"}{p.paymentType && ` · ${p.paymentType}`}</div>
+                            <div style={{ fontSize: 11, color: C.gray600, marginTop: 2 }}>Paid: {p.date || "—"}</div>
+                          </div>
+                          <Badge label={`Next: ${p.nextFeeMonth || "—"}`} color={C.blue} />
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
