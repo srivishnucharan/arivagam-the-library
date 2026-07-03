@@ -710,11 +710,11 @@ const TopNav = ({ user, onLogout, onNavigate, currentPage, settings }) => {
           .books-tbl-row > div:nth-child(7) { flex: 0 0 100%; margin-top: 6px; }
         }
 
-        /* A-Z rail: floating column on desktop → horizontal scroll strip on mobile */
+        /* A-Z rail: vertical column on desktop → sticky horizontal strip on mobile (stays reachable over a long list) */
         @media (max-width: 640px) {
           .books-tbl-scroll-wrap { flex-direction: column !important; }
           .az-scroll-rail {
-            position: static !important; top: auto !important; left: auto !important; transform: none !important;
+            position: sticky !important; top: 60px !important; left: auto !important; transform: none !important;
             flex-direction: row !important; overflow-x: auto; overflow-y: visible !important; max-height: none !important;
             width: 100%; -webkit-overflow-scrolling: touch;
           }
@@ -2555,6 +2555,20 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
             <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }}><Icon name="search" size={14} color={C.gray300} /></span>
           </div>
           <div className="books-tbl-scroll-wrap" style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+          {/* A-Z quick scroll — sticky just under the top nav, so it stays reachable while scrolling a long book list */}
+          <div className="az-scroll-rail" style={{ position: "sticky", top: 68, maxHeight: "calc(100vh - 84px)", overflowY: "auto", display: "flex", flexDirection: "column", gap: 1, background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 10, padding: "6px 3px", flexShrink: 0, boxShadow: "0 2px 8px rgba(0,0,0,.08)", zIndex: 40 }}>
+            {AZ.map(letter => {
+              const has = letterFirstIndex[letter] !== undefined;
+              return (
+                <button key={letter} onClick={() => has && scrollToLetter(letter)} disabled={!has}
+                  style={{ width: 22, height: 18, border: "none", background: "none", borderRadius: 4, fontSize: 10, fontWeight: 700, fontFamily: "inherit", color: has ? C.green : C.gray200, cursor: has ? "pointer" : "default" }}
+                  onMouseEnter={e => { if (has) e.currentTarget.style.background = C.green + "18"; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = "none"; }}>
+                  {letter}
+                </button>
+              );
+            })}
+          </div>
           <div className="books-tbl-container" style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 12, overflowX: "hidden", overflowY: "auto", maxHeight: "70vh", flex: 1, minWidth: 0 }}>
             {/* Header */}
             <div className="books-tbl-head" style={{ display: "grid", gridTemplateColumns: "2fr 1.2fr 1fr 130px 70px 70px 110px", gap: 10, padding: "10px 16px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5, position: "sticky", top: 0, zIndex: 1 }}>
@@ -2636,20 +2650,6 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
                     </div>
                   )}
                 </div>
-              );
-            })}
-          </div>
-          {/* A-Z quick scroll — floats fixed to the viewport, vertically centered, so it's never clipped by scroll position */}
-          <div className="az-scroll-rail" style={{ position: "fixed", left: 10, top: "50%", transform: "translateY(-50%)", maxHeight: "80vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 1, background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 10, padding: "6px 3px", flexShrink: 0, boxShadow: "0 4px 16px rgba(0,0,0,.12)", zIndex: 60 }}>
-            {AZ.map(letter => {
-              const has = letterFirstIndex[letter] !== undefined;
-              return (
-                <button key={letter} onClick={() => has && scrollToLetter(letter)} disabled={!has}
-                  style={{ width: 22, height: 18, border: "none", background: "none", borderRadius: 4, fontSize: 10, fontWeight: 700, fontFamily: "inherit", color: has ? C.green : C.gray200, cursor: has ? "pointer" : "default" }}
-                  onMouseEnter={e => { if (has) e.currentTarget.style.background = C.green + "18"; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = "none"; }}>
-                  {letter}
-                </button>
               );
             })}
           </div>
