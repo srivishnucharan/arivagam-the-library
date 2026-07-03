@@ -2682,26 +2682,25 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       {tab === "members" && !selectedMember && (() => {
         const q = memberSearch.trim().toLowerCase();
         const sortedMembers = [...members].sort((a, b) => String(a.membershipId || a.id).localeCompare(String(b.membershipId || b.id)));
-        // Membership Status bucket comes from the status table lookup; anything besides Paused/Closed counts as Active
+        // Membership Status bucket comes from the status table lookup; InLibrary (inhouse) members are
+        // carved out first so they only ever appear under their own tab, never under Active Members too.
         const membershipStatusBucket = (m) => {
+          if (m.membershipType === "inhouse") return "inlibrary";
           const statusRow = (memberStatuses || []).find(s => s.memberId === (m.membershipId || m.id));
           const status = (statusRow?.status || "").trim();
           if (/^paused/i.test(status)) return "paused";
           if (/^closed/i.test(status)) return "closed";
           return "active";
         };
-        const statusTabCounts = { active: 0, paused: 0, closed: 0 };
+        const statusTabCounts = { active: 0, paused: 0, closed: 0, inlibrary: 0 };
         members.forEach(m => { statusTabCounts[membershipStatusBucket(m)]++; });
-        const inLibraryCount = members.filter(m => m.membershipType === "inhouse").length;
         const statusTabs = [
           { id: "active",    label: "Active Members", count: statusTabCounts.active },
           { id: "paused",    label: "Paused",         count: statusTabCounts.paused },
           { id: "closed",    label: "Closed",         count: statusTabCounts.closed },
-          { id: "inlibrary", label: "InLibrary",       count: inLibraryCount },
+          { id: "inlibrary", label: "InLibrary",       count: statusTabCounts.inlibrary },
         ];
-        const tabFilteredMembers = sortedMembers.filter(m => memberStatusTab === "inlibrary"
-          ? m.membershipType === "inhouse"
-          : membershipStatusBucket(m) === memberStatusTab);
+        const tabFilteredMembers = sortedMembers.filter(m => membershipStatusBucket(m) === memberStatusTab);
         const filteredMembers = tabFilteredMembers.filter(m => (!memberFilter || m.status === memberFilter)
           && (!q || [m.name, m.email, m.phone, m.membershipId, m.id].filter(Boolean).some(v => String(v).toLowerCase().includes(q))));
         const pillStyle = (active) => ({
