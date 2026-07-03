@@ -37,7 +37,7 @@ const bookToDB = (b) => ({
 const dbToUser = (u) => ({
   id: u.id, membershipId: u.membership_id || "",
   name: u.child_member_name, email: u.email_id, phone: u.phone_number || "",
-  role: u.role, status: u.status, membershipType: u.membership_type || "annual",
+  role: u.role, status: u.status, activationStatus: u.activation_status || "", membershipType: u.membership_type || "annual",
   fees: parseFloat(u.fees_due) || 0,
   joined: u.joined_at ? u.joined_at.split("T")[0] : new Date().toISOString().split("T")[0],
   enrollmentDate: u.enrollment_date ? u.enrollment_date.split("T")[0] : "",
@@ -2737,7 +2737,10 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
                       {m.joined}
                     </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                      <Badge label={m.status} color={m.status === "active" ? C.greenMid : m.status === "pending" ? C.orange : C.red} />
+                      {(() => {
+                        const activation = m.activationStatus || m.status || "";
+                        return <Badge label={activation || "—"} color={activation.toLowerCase() === "active" ? C.greenMid : activation.toLowerCase() === "pending" ? C.orange : C.red} />;
+                      })()}
                       {m.fees > 0 && <Badge label={`₹${m.fees} due`} color={C.red} />}
                     </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }} onClick={e => e.stopPropagation()}>
