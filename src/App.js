@@ -1928,7 +1928,9 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     .filter(s => s.status && INCLUDED_RENEWAL_STATUS.test(s.status.trim()))
     .map(s => {
       const member = members.find(m => m.membershipId === s.memberId);
-      if (!member || member.status !== "active") return null;
+      // users.status is unreliable for many rows — activation_status is the authoritative field
+      const isActiveMember = ((member?.activationStatus || member?.status || "").trim().toLowerCase() === "active");
+      if (!member || !isActiveMember) return null;
       const paidDate = s.lastPaidMonth ? new Date(s.lastPaidMonth) : null;
       const validPaidDate = paidDate && !isNaN(paidDate) ? paidDate : null;
       const subscriptionCurrent = !!(validPaidDate && validPaidDate >= renewalCurrentMonthStart);
