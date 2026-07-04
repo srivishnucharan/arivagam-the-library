@@ -2225,7 +2225,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       setCreatedMember(mapped);
       setMemberFormStep("payment");
       showToast(`Member "${memberForm.name}" created. Password: ${autoPassword}`);
-    } catch {
+    } catch (err) {
+      console.error("saveMember: users.insert failed —", err?.message || err);
       const id = "MEM" + String(Date.now()).slice(-6);
       const offlineMember = { ...memberForm, password: autoPassword, id, membershipId: newMembershipId, joined: memberForm.enrollmentDate || today(), fees: 0 };
       setMembers([...members, offlineMember]);
@@ -2252,7 +2253,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       const { data, error } = await supabase.from("payments").insert(paymentRows).select();
       if (error) throw error;
       setPayments?.(prev => [...prev, ...data.map(dbToPayment)]);
-    } catch { /* keep going — payment collection shouldn't block the rest of the flow */ }
+    } catch (err) { console.error("submitMemberPayment: payments.insert failed —", err?.message || err); }
     try {
       const { data: statusData, error: statusErr } = await supabase.from("status").insert({
         member_id: member.membershipId, member_name: member.name,
@@ -2261,11 +2262,12 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       }).select().single();
       if (statusErr) throw statusErr;
       setMemberStatuses(prev => [...prev, dbToMemberStatus(statusData)]);
-    } catch { /* status row can be backfilled later during renewal, same as existing renew flow */ }
+    } catch (err) { console.error("submitMemberPayment: status.insert failed —", err?.message || err); }
     try {
-      await supabase.from("users").update({ payment_reference_no: paymentTxnId.trim(), payment_method: paymentChoice }).eq("id", member.id);
+      const { error: refErr } = await supabase.from("users").update({ payment_reference_no: paymentTxnId.trim(), payment_method: paymentChoice }).eq("id", member.id);
+      if (refErr) throw refErr;
       setMembers(prev => prev.map(m => m.id === member.id ? { ...m, paymentReferenceNo: paymentTxnId.trim(), paymentMethod: paymentChoice } : m));
-    } catch { /* non-critical — reference number can be corrected via Edit Member later */ }
+    } catch (err) { console.error("submitMemberPayment: users.update (payment_reference_no) failed —", err?.message || err); }
     setPaymentSubmitting(false);
     setMemberFormStep("success");
   };
@@ -2356,13 +2358,14 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
             if (insertErr) throw insertErr;
             if (inserted?.[0]) setMemberStatuses(prev => [...prev, dbToMemberStatus(inserted[0])]);
           }
-        } catch { /* status table write failed — users.status/activation_status already succeeded above */ }
+        } catch (err) { console.error("approveMember: status table write failed —", err?.message || err); }
       }
-    } catch {
+    } catch (err) {
+      console.error("approveMember: users.update failed —", err?.message || err);
       const offlineMember = { ...pendingMember, status: "active", activationStatus: "active", plan: planId || pendingMember?.plan || null };
       setMembers(members.map(m => m.id === memberId ? offlineMember : m));
       activatedMember = offlineMember;
-      showToast(`Membership activated (offline)!`);
+      showToast(`Membership activated locally only — database update failed (${err?.message || "unknown error"}). Check console.`, "error");
     }
     // Fire welcome email — non-blocking, silent on failure
     if (activatedMember?.email) {
