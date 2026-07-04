@@ -37,7 +37,9 @@ const bookToDB = (b) => ({
 const dbToUser = (u) => ({
   id: u.id, membershipId: u.membership_id || "",
   name: u.child_member_name, email: u.email_id, phone: u.phone_number || "",
-  role: u.role, status: u.status, activationStatus: u.activation_status || "", membershipType: u.membership_type || "annual",
+  // The users table no longer has a separate 'status' column — activation_status is now
+  // authoritative, so mirror it into .status too (kept for the many existing call sites).
+  role: u.role, status: u.activation_status || "", activationStatus: u.activation_status || "", membershipType: u.membership_type || "annual",
   fees: parseFloat(u.fees_due) || 0,
   joined: u.joined_at ? u.joined_at.split("T")[0] : new Date().toISOString().split("T")[0],
   enrollmentDate: u.enrollment_date ? u.enrollment_date.split("T")[0] : "",
@@ -1050,14 +1052,15 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings }) => {
         address: form.address.trim(),
         password: form.password,
         role: "member",
-        status: "pending",
+        activation_status: "pending",
         membership_plan: selectedPlanId,
         membership_type: selectedPlan?.inhouseOnly ? "inhouse" : "monthly",
         fees_due: 0,
       }).select().single();
       if (error) throw error;
       onRegisterSuccess(dbToUser(data));
-    } catch {
+    } catch (err) {
+      console.error("RegisterPage: users.insert failed —", err?.message || err);
       // Fallback to in-memory
       onRegisterSuccess({
         id: "PENDING_" + Date.now(), membershipId: "",
@@ -2176,7 +2179,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           offer_type: memberForm.offerType || null,
           refundable_deposit: memberForm.refundableDeposit !== "" ? parseFloat(memberForm.refundableDeposit) : null,
           branch_id: memberForm.branch || null,
-          membership_type: memberForm.membershipType, status: memberForm.status,
+          membership_type: memberForm.membershipType, activation_status: memberForm.status,
           membership_plan_description: memberForm.planDescription || null,
           comments: memberForm.comments || null,
         };
@@ -2186,7 +2189,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         if (error) throw error;
         setMembers(members.map(m => m.id === editMember.id ? dbToUser(data) : m));
         showToast(`Member "${memberForm.name}" updated.`);
-      } catch {
+      } catch (err) {
+        console.error("saveMember: users.update failed —", err?.message || err);
         setMembers(members.map(m => m.id === editMember.id ? { ...editMember, ...memberForm } : m));
         showToast(`Member "${memberForm.name}" updated (offline).`);
       }
@@ -2211,7 +2215,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         offer_type: memberForm.offerType || null,
         refundable_deposit: memberForm.refundableDeposit !== "" ? parseFloat(memberForm.refundableDeposit) : null,
         branch_id: memberForm.branch || null,
-        password: autoPassword, role: "member", status: memberForm.status,
+        password: autoPassword, role: "member", activation_status: memberForm.status,
         membership_id: newMembershipId,
         membership_type: memberForm.membershipType, fees_due: 0,
         membership_plan_description: memberForm.planDescription || null,
@@ -2281,7 +2285,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         const baseName = nameCol ? (row[nameCol] || "").trim() : "";
         const rec = {
           role: "member",
-          status: "active",
+          activation_status: "active",
           fees_due: 0,
           password: baseName ? baseName.split(" ")[0].toLowerCase() + Math.floor(1000 + Math.random() * 9000) : "member" + Math.floor(1000 + Math.random() * 9000),
         };
@@ -2320,7 +2324,10 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
 
   const deleteMember = async (id) => {
     if (!window.confirm("Delete this member?")) return;
-    try { await supabase.from("users").update({ status: "suspended" }).eq("id", id); } catch {}
+    try {
+      const { error } = await supabase.from("users").update({ activation_status: "suspended" }).eq("id", id);
+      if (error) throw error;
+    } catch (err) { console.error("deleteMember: users.update failed —", err?.message || err); }
     setMembers(members.filter(m => m.id !== id));
     showToast("Member removed.");
   };
@@ -2329,8 +2336,9 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     let activatedMember = null;
     const pendingMember = members.find(m => m.id === memberId);
     try {
-      // membership_id is assigned once at creation and is never reissued here
-      const updateData = { status: "active", activation_status: "active" };
+      // membership_id is assigned once at creation and is never reissued here.
+      // users.status no longer exists as a column — activation_status is the only one now.
+      const updateData = { activation_status: "active" };
       if (planId) updateData.membership_plan = planId;
       const { data, error } = await supabase.from("users").update(updateData).eq("id", memberId).select().single();
       if (error) throw error;
@@ -2458,14 +2466,15 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         const updateData = {
           child_member_name: libForm.name, email_id: libForm.email,
           phone_number: libForm.phone || null, branch_id: libForm.branch || null,
-          status: libForm.status,
+          activation_status: libForm.status,
         };
         if (libForm.password.trim()) updateData.password = libForm.password.trim();
         const { data, error } = await supabase.from("users").update(updateData).eq("id", editLib.id).select().single();
         if (error) throw error;
         setLibrarians(librarians.map(l => l.id === editLib.id ? dbToUser(data) : l));
         showToast("Librarian updated.");
-      } catch {
+      } catch (err) {
+        console.error("saveLib: users.update failed —", err?.message || err);
         setLibrarians(librarians.map(l => l.id === editLib.id ? { ...editLib, ...libForm } : l));
         showToast("Librarian updated (offline).");
       }
@@ -2474,14 +2483,15 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         const insertData = {
           child_member_name: libForm.name, email_id: libForm.email,
           phone_number: libForm.phone || null, branch_id: libForm.branch || null,
-          status: libForm.status, password: autoPassword, role: "librarian",
+          activation_status: libForm.status, password: autoPassword, role: "librarian",
         };
         const { data, error } = await supabase.from("users").insert(insertData).select().single();
         if (error) throw error;
         const mapped = dbToUser(data);
         setLibrarians([...librarians, mapped]);
         showToast(`Librarian "${libForm.name}" added. Password: ${autoPassword}`);
-      } catch {
+      } catch (err) {
+        console.error("saveLib: users.insert failed —", err?.message || err);
         const id = nextId(librarians, "LIB");
         setLibrarians([...librarians, { ...libForm, id, password: autoPassword, joined: today() }]);
         showToast(`Librarian "${libForm.name}" added (offline). Password: ${autoPassword}`);
