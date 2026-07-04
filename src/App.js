@@ -1929,8 +1929,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   // Matches the "MMM YYYY" text format already used in the status table's last_paid_month column (e.g. "Oct 2023")
   const monthYearLabel = (year, monthIndex) => new Date(year, monthIndex, 1).toLocaleString("en-US", { month: "short", year: "numeric" });
   // Only track members whose status-table status is some flavor of Active (Active, Active - Last
-  // Month, Active - Late) or Default — Paused, Closed*, In Library Reading, Volunteer, EWS are suppressed.
-  const INCLUDED_RENEWAL_STATUS = /^(active|default)/i;
+  // Month, Active - Late) — Default, Paused, Closed*, In Library Reading, Volunteer, EWS are suppressed.
+  const INCLUDED_RENEWAL_STATUS = /^active/i;
   const renewalCurrentMonthStart = new Date();
   renewalCurrentMonthStart.setDate(1);
   renewalCurrentMonthStart.setHours(0, 0, 0, 0);
@@ -2642,6 +2642,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     if (/library/i.test(status)) return "inlibrary";
     if (/^paused/i.test(status)) return "paused";
     if (/^closed/i.test(status)) return "closed";
+    if (/^default/i.test(status)) return "default";
+    if (/^volunteer/i.test(status)) return "volunteer";
     return "active";
   };
   const activeMembersCount = members.filter(m => membershipStatusBucket(m) === "active").length;
@@ -2822,13 +2824,15 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       {tab === "members" && !selectedMember && (() => {
         const q = memberSearch.trim().toLowerCase();
         const sortedMembers = [...members].sort((a, b) => String(a.membershipId || a.id).localeCompare(String(b.membershipId || b.id)));
-        const statusTabCounts = { active: 0, paused: 0, closed: 0, inlibrary: 0 };
+        const statusTabCounts = { active: 0, paused: 0, closed: 0, inlibrary: 0, default: 0, volunteer: 0 };
         members.forEach(m => { statusTabCounts[membershipStatusBucket(m)]++; });
         const statusTabs = [
           { id: "active",    label: "Active Members", count: statusTabCounts.active },
           { id: "paused",    label: "Paused",         count: statusTabCounts.paused },
           { id: "closed",    label: "Closed",         count: statusTabCounts.closed },
           { id: "inlibrary", label: "InLibrary",       count: statusTabCounts.inlibrary },
+          { id: "default",   label: "Default",        count: statusTabCounts.default },
+          { id: "volunteer", label: "Volunteer",       count: statusTabCounts.volunteer },
         ];
         const tabFilteredMembers = sortedMembers.filter(m => membershipStatusBucket(m) === memberStatusTab);
         const filteredMembers = tabFilteredMembers.filter(m => (!memberFilter || m.status === memberFilter)
