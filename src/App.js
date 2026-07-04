@@ -1022,12 +1022,32 @@ const LoginPage = ({ onLogin, onRegister, initialTab = "member" }) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // REGISTRATION PAGE
 // ─────────────────────────────────────────────────────────────────────────────
-const RegisterPage = ({ onRegisterSuccess, onBack, settings }) => {
+const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }) => {
   const plans = settings.plans || DEFAULT_PLANS;
-  const [form, setForm] = useState({ name: "", email: "", phone: "", address: "", password: "", confirm: "" });
+  const [form, setForm] = useState({
+    name: "", email: "", phone: "", altPhone: "", upiId: "", address: "",
+    childMemberName: "", childMemberDOB: "", guardianName: "", relationshipToMember: "",
+    paymentMethod: "upi", offerType: "", registrationFees: "250", refundableDeposit: "",
+    branch: "", membershipType: "monthly", planDescription: "", comments: "",
+    password: "", confirm: "",
+  });
   const [selectedPlanId, setSelectedPlanId] = useState(plans[0]?.id || "");
   const [errors, setErrors] = useState({});
-  const [submitted, setSubmitted] = useState(false);
+  const [step, setStep] = useState("form"); // "form" | "payment" | "success"
+  const [createdMember, setCreatedMember] = useState(null);
+  const [paymentChoice, setPaymentChoice] = useState("upi"); // "cash" | "upi"
+  const [paymentTxnId, setPaymentTxnId] = useState("");
+  const [paymentTxnError, setPaymentTxnError] = useState("");
+  const [paymentSubmitting, setPaymentSubmitting] = useState(false);
+
+  // Branches load asynchronously — pick the default (main) branch once they arrive,
+  // but don't clobber a choice the visitor already made.
+  useEffect(() => {
+    if (!form.branch && branches && branches.length) {
+      const def = branches.find(b => /main/i.test(b.name || "")) || branches[0];
+      if (def) setForm(f => (f.branch ? f : { ...f, branch: def.id }));
+    }
+  }, [branches]); // eslint-disable-line
 
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
 
@@ -1037,138 +1057,350 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings }) => {
     const e = {};
     if (!form.name.trim()) e.name = "Full name is required.";
     if (!form.email.includes("@")) e.email = "Enter a valid email.";
-    if (form.phone && !/^\d{10}$/.test(form.phone.replace(/\s/g, ""))) e.phone = "Enter a 10-digit phone number.";
+    if (!form.phone.trim() || !/^\d{10}$/.test(form.phone.replace(/\s/g, ""))) e.phone = "Enter a 10-digit phone number.";
+    if (!form.address.trim()) e.address = "Address is required.";
+    if (!selectedPlanId) e.plan = "Membership Plan is required.";
     if (form.password.length < 6) e.password = "Password must be at least 6 characters.";
     if (form.password !== form.confirm) e.confirm = "Passwords do not match.";
     return e;
+  };
+
+  // Member IDs are assigned once, at registration, and are never reissued — mirrors
+  // computeNextMembershipId in the Librarian Add Member form.
+  const computeNextMembershipId = () => {
+    const joinDate = today();
+    const sameMonthCount = (members || []).filter(m => m.joined &&
+      new Date(m.joined).getFullYear() === new Date(joinDate).getFullYear() &&
+      new Date(m.joined).getMonth() === new Date(joinDate).getMonth()
+    ).length;
+    return genMembershipId(joinDate, sameMonthCount);
   };
 
   const handleSubmit = async () => {
     const e = validate();
     if (Object.keys(e).length) { setErrors(e); return; }
     setErrors({});
+    const newMembershipId = computeNextMembershipId();
+    const insertData = {
+      child_member_name: form.name.trim(),
+      email_id: form.email.trim().toLowerCase(),
+      phone_number: form.phone.trim(),
+      alternate_phone_number: form.altPhone || null,
+      enrollment_date: today(),
+      child_member_dateofbirth: form.childMemberDOB || null,
+      parent_guardian_name: form.guardianName || null,
+      relationship_to_the_member: form.relationshipToMember || null,
+      address: form.address.trim(),
+      upi_id: form.upiId || null,
+      payment_method: form.paymentMethod || null,
+      onetime_registration_fees: form.registrationFees !== "" ? parseFloat(form.registrationFees) : null,
+      offer_type: form.offerType || null,
+      refundable_deposit: form.refundableDeposit !== "" ? parseFloat(form.refundableDeposit) : null,
+      branch_id: form.branch || null,
+      password: form.password,
+      role: "member",
+      activation_status: "pending",
+      membership_id: newMembershipId,
+      membership_type: selectedPlan?.inhouseOnly ? "inhouse" : form.membershipType,
+      fees_due: 0,
+      membership_plan_description: form.planDescription || null,
+      comments: form.comments || null,
+      membership_plan: selectedPlanId,
+    };
     try {
-      const { data, error } = await supabase.from("users").insert({
-        child_member_name: form.name.trim(),
-        email_id: form.email.trim().toLowerCase(),
-        phone_number: form.phone.trim(),
-        address: form.address.trim(),
-        password: form.password,
-        role: "member",
-        activation_status: "pending",
-        membership_plan: selectedPlanId,
-        membership_type: selectedPlan?.inhouseOnly ? "inhouse" : "monthly",
-        fees_due: 0,
-      }).select().single();
+      const { data, error } = await supabase.from("users").insert(insertData).select().single();
       if (error) throw error;
-      onRegisterSuccess(dbToUser(data));
+      const mapped = dbToUser(data);
+      onRegisterSuccess(mapped);
+      setCreatedMember(mapped);
+      setStep("payment");
     } catch (err) {
       console.error("RegisterPage: users.insert failed —", err?.message || err);
-      // Fallback to in-memory
-      onRegisterSuccess({
-        id: "PENDING_" + Date.now(), membershipId: "",
+      const offlineMember = {
+        id: "PENDING_" + Date.now(), membershipId: newMembershipId,
         name: form.name.trim(), email: form.email.trim().toLowerCase(),
         phone: form.phone.trim(), password: form.password,
         plan: selectedPlanId,
-        membershipType: selectedPlan?.inhouseOnly ? "inhouse" : "monthly",
+        membershipType: selectedPlan?.inhouseOnly ? "inhouse" : form.membershipType,
         status: "pending", joined: today(), fees: 0,
-      });
+      };
+      onRegisterSuccess(offlineMember);
+      setCreatedMember(offlineMember);
+      setStep("payment");
     }
-    setSubmitted(true);
   };
 
-  if (submitted) {
-    return (
-      <div style={{ minHeight: "100vh", background: `linear-gradient(135deg, ${C.green}, ${C.greenMid})`, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-        <div style={{ background: C.white, borderRadius: 20, padding: "40px 36px", maxWidth: 420, width: "100%", textAlign: "center", boxShadow: "0 32px 80px rgba(0,0,0,.25)" }}>
-          <div style={{ width: 64, height: 64, background: "#D5F5E3", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px" }}>
-            <Icon name="check" size={32} color="#27AE60" />
-          </div>
-          <h2 style={{ color: C.green, margin: "0 0 10px" }}>Registration Submitted!</h2>
-          <p style={{ color: C.gray600, margin: "0 0 20px", fontSize: 14, lineHeight: 1.6 }}>
-            Your request has been sent to the librarian for approval. Once activated, you'll receive your Membership ID and can start borrowing books.
-          </p>
-          <Btn onClick={onBack} variant="primary" style={{ margin: "0 auto", display: "block" }}>Go to Sign In</Btn>
-        </div>
-      </div>
-    );
-  }
+  // Collects the registration/deposit/subscription payment for the just-created member —
+  // mirrors submitMemberPayment in the Librarian Add Member form.
+  const submitPayment = async ({ member, plan, registrationFee, depositFee, subscriptionFee }) => {
+    if (!paymentTxnId.trim()) { setPaymentTxnError("Enter the transaction / reference number."); return; }
+    setPaymentTxnError("");
+    setPaymentSubmitting(true);
+    const now = new Date();
+    const thisMonthLabel = now.toLocaleString("en-IN", { month: "short" }) + "-" + String(now.getFullYear()).slice(2);
+    const next = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const nextMonthLabel = next.toLocaleString("en-IN", { month: "short" }) + "-" + String(next.getFullYear()).slice(2);
+    const dateStr = today();
+    const paymentRows = [
+      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: registrationFee, payment_method: paymentChoice, next_fee_month: null, payment_type: "Registration" },
+      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: depositFee, payment_method: paymentChoice, next_fee_month: null, payment_type: "Deposit" },
+      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: subscriptionFee, payment_method: paymentChoice, next_fee_month: nextMonthLabel, payment_type: "Subscription" },
+    ];
+    try {
+      await supabase.from("payments").insert(paymentRows);
+    } catch (err) { console.error("RegisterPage: payments.insert failed —", err?.message || err); }
+    try {
+      await supabase.from("status").insert({
+        member_id: member.membershipId, member_name: member.name,
+        status: "Pending", membership_plan: plan?.name || null,
+        last_paid_month: thisMonthLabel, number_of_books_with_member: 0,
+      });
+    } catch (err) { console.error("RegisterPage: status.insert failed —", err?.message || err); }
+    try {
+      await supabase.from("users").update({ payment_reference_no: paymentTxnId.trim(), payment_method: paymentChoice }).eq("id", member.id);
+    } catch (err) { console.error("RegisterPage: users.update (payment_reference_no) failed —", err?.message || err); }
+    setPaymentSubmitting(false);
+    setStep("success");
+  };
+
+  const cardWidth = step === "form" ? 640 : 460;
 
   return (
     <div style={{ minHeight: "100vh", background: `linear-gradient(135deg, ${C.green}, ${C.greenMid})`, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div style={{ background: C.white, borderRadius: 20, width: "100%", maxWidth: 460, boxShadow: "0 32px 80px rgba(0,0,0,.25)", overflow: "hidden" }}>
+      <div style={{ background: C.white, borderRadius: 20, width: "100%", maxWidth: cardWidth, boxShadow: "0 32px 80px rgba(0,0,0,.25)", overflow: "hidden" }}>
         <div style={{ background: C.green, padding: "22px 28px", display: "flex", alignItems: "center", gap: 16 }}>
-          <button onClick={onBack} style={{ background: "rgba(255,255,255,.15)", border: "none", cursor: "pointer", padding: "6px 10px", borderRadius: 8, color: C.white, display: "flex", alignItems: "center", gap: 4, fontSize: 12, fontFamily: "inherit", fontWeight: 600 }}>
-            ← Back
-          </button>
+          {step === "form" && (
+            <button onClick={onBack} style={{ background: "rgba(255,255,255,.15)", border: "none", cursor: "pointer", padding: "6px 10px", borderRadius: 8, color: C.white, display: "flex", alignItems: "center", gap: 4, fontSize: 12, fontFamily: "inherit", fontWeight: 600 }}>
+              ← Back
+            </button>
+          )}
           <div>
-            <div style={{ color: C.gold, fontWeight: 900, fontSize: 16 }}>Register for Free</div>
+            <div style={{ color: C.gold, fontWeight: 900, fontSize: 16 }}>
+              {step === "payment" ? "Payment" : step === "success" ? "All Set!" : "Register for Free"}
+            </div>
             <div style={{ color: "rgba(255,255,255,.7)", fontSize: 12 }}>Membership requires librarian approval</div>
           </div>
         </div>
 
-        <div style={{ padding: "24px 28px 28px" }}>
-          <Input label="Full Name" value={form.name} onChange={set("name")} placeholder="Your full name" icon="user" required error={errors.name} />
-          <Input label="Email Address" type="email" value={form.email} onChange={set("email")} placeholder="your@email.com" icon="mail" required error={errors.email} />
-          <Input label="Phone Number" value={form.phone} onChange={set("phone")} placeholder="10-digit mobile number" icon="phone" error={errors.phone} hint="Optional but helps librarian reach you" />
-
-          <div style={{ marginBottom: 14 }}>
-            <label style={{ fontSize: 12, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5, display: "block", marginBottom: 5 }}>Address</label>
-            <textarea value={form.address} onChange={set("address")} placeholder="Door No, Street, City, State — Pincode" rows={3}
-              style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none", resize: "vertical" }}
-              onFocus={e => e.target.style.borderColor = C.green}
-              onBlur={e => e.target.style.borderColor = C.gray300} />
-            <div style={{ fontSize: 11, color: C.gray600, marginTop: 3 }}>Optional — helps the librarian locate you</div>
-          </div>
-
-          <div style={{ marginBottom: 6 }}>
-            <label style={{ fontSize: 12, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5, display: "block", marginBottom: 5 }}>
-              Membership Plan <span style={{ color: C.red }}>*</span>
-            </label>
-            <select value={selectedPlanId} onChange={e => setSelectedPlanId(e.target.value)}
-              style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none", background: C.white, color: C.gray900 }}
-              onFocus={e => e.target.style.borderColor = C.green}
-              onBlur={e => e.target.style.borderColor = C.gray300}>
-              {plans.map(p => (
-                <option key={p.id} value={p.id}>
-                  {p.inhouseOnly
-                    ? `${p.name} — Walk-in reading · No monthly fee`
-                    : `${p.name} — Borrow up to ${p.borrowLimit} book${p.borrowLimit !== 1 ? "s" : ""} · ₹${p.cost}/month`}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {selectedPlan && (
-            <div style={{ background: selectedPlan.inhouseOnly ? C.green + "10" : C.blueLight, border: `1px solid ${selectedPlan.inhouseOnly ? C.green + "40" : C.blue + "40"}`, borderRadius: 8, padding: "10px 14px", fontSize: 12, color: C.gray900, marginBottom: 14, lineHeight: 1.6 }}>
-              {selectedPlan.inhouseOnly ? (
-                <>
-                  <span style={{ fontWeight: 700, color: C.green }}>Inhouse Reading</span>
-                  {" · "} One-time registration fee only · Walk in anytime to read in the library · Books cannot be borrowed or taken home
-                </>
-              ) : (
-                <>
-                  <span style={{ fontWeight: 700, color: C.blue }}>{selectedPlan.name}</span>
-                  {" · "} Borrow up to <strong>{selectedPlan.borrowLimit}</strong> book{selectedPlan.borrowLimit !== 1 ? "s" : ""} at a time
-                  {" · "} ₹<strong>{selectedPlan.cost}</strong>/month
-                  {selectedPlan.refundableDeposit > 0 && <> · Refundable deposit ₹<strong>{selectedPlan.refundableDeposit}</strong></>}
-                </>
-              )}
+        {step === "form" && (
+          <div style={{ padding: "24px 28px 28px" }}>
+            {/* ── Your Details ── */}
+            <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>Your Details</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+              <Input label="Full Name" value={form.name} onChange={set("name")} placeholder="Your full name" icon="user" required error={errors.name} />
+              <Input label="Email Address" type="email" value={form.email} onChange={set("email")} placeholder="your@email.com" icon="mail" required error={errors.email} />
+              <Input label="Phone Number" value={form.phone} onChange={set("phone")} placeholder="10-digit mobile number" icon="phone" required error={errors.phone} />
+              <Input label="Alternate Phone" value={form.altPhone} onChange={set("altPhone")} placeholder="+91 98765 43210" icon="phone" />
+              <Input label="UPI ID" value={form.upiId} onChange={set("upiId")} placeholder="name@upi or 9876543210@paytm" hint="Used for renewal payment links" />
             </div>
-          )}
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ fontSize: 12, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5, display: "block", marginBottom: 5 }}>Address<span style={{ color: C.red }}> *</span></label>
+              <textarea value={form.address} onChange={set("address")} placeholder="Door No, Street, City, State — Pincode" rows={2}
+                style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${errors.address ? C.red : C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none", resize: "vertical" }}
+                onFocus={e => e.target.style.borderColor = C.green}
+                onBlur={e => e.target.style.borderColor = errors.address ? C.red : C.gray300} />
+              {errors.address && <p style={{ fontSize: 11, color: C.red, margin: "4px 0 0" }}>{errors.address}</p>}
+            </div>
 
-          <div style={{ height: 1, background: C.gray100, margin: "4px 0 16px" }} />
-          <Input label="Password" type="password" value={form.password} onChange={set("password")} placeholder="At least 6 characters" icon="lock" required error={errors.password} />
-          <Input label="Confirm Password" type="password" value={form.confirm} onChange={set("confirm")} placeholder="Re-enter password" icon="lock" required error={errors.confirm} />
+            {/* ── Child Member ── */}
+            <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Child Member (if applicable)</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+              <Input label="Child Member Name" value={form.childMemberName} onChange={set("childMemberName")} placeholder="Child's full name" />
+              <Input label="Child Date of Birth" type="date" value={form.childMemberDOB} onChange={set("childMemberDOB")} />
+              <Input label="Parent / Guardian Name" value={form.guardianName} onChange={set("guardianName")} placeholder="Guardian's name" />
+              <Input label="Relationship to Member" value={form.relationshipToMember} onChange={set("relationshipToMember")} placeholder="e.g. Father, Mother" />
+            </div>
 
-          <div style={{ background: C.goldLight, borderRadius: 8, padding: "10px 14px", fontSize: 12, color: C.green, fontWeight: 600, marginBottom: 18 }}>
-            <Icon name="info" size={13} color={C.goldDark} /> Membership is activated by a librarian. You can browse books after registration, but borrowing requires an active membership.
+            {/* ── Membership Plan ── */}
+            <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Membership Plan</div>
+            <div style={{ marginBottom: 6 }}>
+              <label style={{ fontSize: 12, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5, display: "block", marginBottom: 5 }}>
+                Plan <span style={{ color: C.red }}>*</span>
+              </label>
+              <select value={selectedPlanId} onChange={e => {
+                const planId = e.target.value;
+                const chosenPlan = plans.find(p => p.id === planId);
+                setSelectedPlanId(planId);
+                setForm(f => ({
+                  ...f,
+                  refundableDeposit: chosenPlan ? String(chosenPlan.refundableDeposit || 0) : f.refundableDeposit,
+                  planDescription: chosenPlan
+                    ? (chosenPlan.inhouseOnly ? `${chosenPlan.name} — walk-in, no borrowing` : `${chosenPlan.name} — Borrow up to ${chosenPlan.borrowLimit} book${chosenPlan.borrowLimit !== 1 ? "s" : ""} · ₹${chosenPlan.cost}/month subscription`)
+                    : f.planDescription,
+                  membershipType: chosenPlan ? (chosenPlan.inhouseOnly ? "inhouse" : "monthly") : f.membershipType,
+                }));
+              }}
+                style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none", background: C.white, color: C.gray900 }}
+                onFocus={e => e.target.style.borderColor = C.green}
+                onBlur={e => e.target.style.borderColor = C.gray300}>
+                {plans.map(p => (
+                  <option key={p.id} value={p.id}>
+                    {p.inhouseOnly
+                      ? `${p.name} — Walk-in reading · No monthly fee`
+                      : `${p.name} — Borrow up to ${p.borrowLimit} book${p.borrowLimit !== 1 ? "s" : ""} · ₹${p.cost}/month`}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {selectedPlan && (
+              <div style={{ background: selectedPlan.inhouseOnly ? C.green + "10" : C.blueLight, border: `1px solid ${selectedPlan.inhouseOnly ? C.green + "40" : C.blue + "40"}`, borderRadius: 8, padding: "10px 14px", fontSize: 12, color: C.gray900, marginBottom: 14, lineHeight: 1.6 }}>
+                {selectedPlan.inhouseOnly ? (
+                  <>
+                    <span style={{ fontWeight: 700, color: C.green }}>Inhouse Reading</span>
+                    {" · "} One-time registration fee only · Walk in anytime to read in the library · Books cannot be borrowed or taken home
+                  </>
+                ) : (
+                  <>
+                    <span style={{ fontWeight: 700, color: C.blue }}>{selectedPlan.name}</span>
+                    {" · "} Borrow up to <strong>{selectedPlan.borrowLimit}</strong> book{selectedPlan.borrowLimit !== 1 ? "s" : ""} at a time
+                    {" · "} ₹<strong>{selectedPlan.cost}</strong>/month
+                    {selectedPlan.refundableDeposit > 0 && <> · Refundable deposit ₹<strong>{selectedPlan.refundableDeposit}</strong></>}
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* ── Registration Fee & Payment Info ── */}
+            <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Registration Fee &amp; Payment</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+              <Select label="Payment Method" value={form.paymentMethod} onChange={set("paymentMethod")} options={[
+                { value: "", label: "— Select —" },
+                { value: "cash", label: "Cash" },
+                { value: "upi", label: "UPI" },
+                { value: "bank_transfer", label: "Bank Transfer" },
+                { value: "card", label: "Card" },
+                { value: "cheque", label: "Cheque" },
+              ]} />
+              <Input label="Offer Type" value={form.offerType} onChange={set("offerType")} placeholder="e.g. Referral, Festival" />
+              <Input label="One-time Registration Fee (₹)" type="number" value={form.registrationFees} onChange={set("registrationFees")} placeholder="0" />
+              <Input label="Refundable Deposit (₹)" type="number" value={form.refundableDeposit} onChange={set("refundableDeposit")} placeholder="0" />
+            </div>
+
+            {/* ── Branch ── */}
+            {branches && branches.length > 0 && (
+              <>
+                <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Branch</div>
+                <Select label="Which branch are you joining?" value={form.branch} onChange={set("branch")} options={[
+                  { value: "", label: "— Select branch —" },
+                  ...branches.map(b => ({ value: b.id, label: b.name })),
+                ]} />
+              </>
+            )}
+
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 5, textTransform: "uppercase", letterSpacing: .5 }}>Anything else?</label>
+              <textarea value={form.comments} onChange={set("comments")} placeholder="Any additional notes for the librarian" rows={2}
+                style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", resize: "vertical", outline: "none" }}
+                onFocus={e => e.target.style.borderColor = C.green} onBlur={e => e.target.style.borderColor = C.gray300} />
+            </div>
+
+            <div style={{ height: 1, background: C.gray100, margin: "4px 0 16px" }} />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+              <Input label="Password" type="password" value={form.password} onChange={set("password")} placeholder="At least 6 characters" icon="lock" required error={errors.password} />
+              <Input label="Confirm Password" type="password" value={form.confirm} onChange={set("confirm")} placeholder="Re-enter password" icon="lock" required error={errors.confirm} />
+            </div>
+
+            <div style={{ background: C.goldLight, borderRadius: 8, padding: "10px 14px", fontSize: 12, color: C.green, fontWeight: 600, marginBottom: 18 }}>
+              <Icon name="info" size={13} color={C.goldDark} /> Membership is activated by a librarian. You can browse books after registration, but borrowing requires an active membership.
+            </div>
+
+            <Btn onClick={handleSubmit} variant="primary" size="lg" style={{ width: "100%", justifyContent: "center" }}>
+              Submit Registration →
+            </Btn>
           </div>
+        )}
 
-          <Btn onClick={handleSubmit} variant="primary" size="lg" style={{ width: "100%", justifyContent: "center" }}>
-            Submit Registration →
-          </Btn>
-        </div>
+        {step === "payment" && createdMember && (() => {
+          const plan = plans.find(p => p.id === createdMember.plan) || selectedPlan;
+          const registrationFee = parseFloat(form.registrationFees) || 0;
+          const depositFee = parseFloat(form.refundableDeposit) || 0;
+          const subscriptionFee = plan?.cost || 0;
+          const total = registrationFee + depositFee + subscriptionFee;
+          const libraryUpi = settings.library?.upiId || "";
+          const libName = settings.library?.name || "Library";
+          const upiLink = libraryUpi && total > 0
+            ? `upi://pay?pa=${encodeURIComponent(libraryUpi)}&pn=${encodeURIComponent(libName)}&am=${total}&tn=${encodeURIComponent("Arivagam Subscription")}&cu=INR`
+            : null;
+          const qrSrc = upiLink
+            ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(upiLink)}&margin=6&color=1B4332`
+            : null;
+          return (
+            <div style={{ padding: "24px 28px 28px" }}>
+              <div style={{ background: C.blueLight, border: `1px solid ${C.blue}30`, borderRadius: 10, padding: "12px 16px", marginBottom: 16 }}>
+                <div style={{ fontWeight: 700, fontSize: 14, color: C.green }}>{createdMember.name}</div>
+                <div style={{ fontSize: 12, color: C.gray600, marginTop: 2 }}>Member ID: <strong style={{ fontFamily: "monospace" }}>{createdMember.membershipId}</strong></div>
+              </div>
+
+              <div style={{ background: C.gray50, borderRadius: 10, padding: "14px 16px", marginBottom: 16, border: `1px solid ${C.gray100}` }}>
+                <div style={{ fontSize: 12, color: C.gray600, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>Amount Due</div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "6px 0" }}>
+                  <span>Registration Fee</span><span style={{ fontWeight: 700 }}>₹{registrationFee.toLocaleString()}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "6px 0", borderTop: `1px solid ${C.gray100}` }}>
+                  <span>Refundable Deposit</span><span style={{ fontWeight: 700 }}>₹{depositFee.toLocaleString()}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "6px 0", borderTop: `1px solid ${C.gray100}` }}>
+                  <span>{plan?.name || "Subscription"} — 1st month</span><span style={{ fontWeight: 700 }}>₹{subscriptionFee.toLocaleString()}</span>
+                </div>
+                <div style={{ borderTop: `2px solid ${C.gray300}`, marginTop: 8, paddingTop: 8, display: "flex", justifyContent: "space-between", fontWeight: 800, fontSize: 17 }}>
+                  <span>Total</span><span style={{ color: C.green }}>₹{total.toLocaleString()}</span>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 16, marginBottom: 16 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}>
+                  <input type="radio" name="register-paymethod" value="cash" checked={paymentChoice === "cash"} onChange={() => setPaymentChoice("cash")} style={{ accentColor: C.green }} />
+                  Pay by Cash
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}>
+                  <input type="radio" name="register-paymethod" value="upi" checked={paymentChoice === "upi"} onChange={() => setPaymentChoice("upi")} style={{ accentColor: C.green }} />
+                  Pay by UPI
+                </label>
+              </div>
+
+              {paymentChoice === "upi" && (
+                <div style={{ textAlign: "center", marginBottom: 16 }}>
+                  {qrSrc ? (
+                    <>
+                      <div style={{ background: C.white, border: `2px solid ${C.green}`, borderRadius: 14, padding: 10, display: "inline-block", boxShadow: "0 4px 16px rgba(0,0,0,.1)" }}>
+                        <img src={qrSrc} alt="UPI QR Code" width={180} height={180} style={{ display: "block", borderRadius: 8 }} />
+                      </div>
+                      <div style={{ marginTop: 10, fontSize: 14, fontWeight: 800, color: C.green }}>Scan &amp; Pay ₹{total.toLocaleString()}</div>
+                      <a href={upiLink} style={{ display: "inline-flex", marginTop: 8, alignItems: "center", gap: 6, padding: "8px 16px", background: C.green, color: C.white, borderRadius: 8, fontWeight: 700, fontSize: 13, textDecoration: "none" }}>Open in UPI App</a>
+                    </>
+                  ) : (
+                    <div style={{ background: C.gray50, border: `1.5px dashed ${C.gray300}`, borderRadius: 12, padding: "20px" }}>
+                      <div style={{ fontSize: 13, color: C.gray600 }}>Library UPI not configured yet — pay the librarian directly and enter a reference below.</div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <Input label="Transaction ID / Reference No." value={paymentTxnId} onChange={e => setPaymentTxnId(e.target.value)} placeholder="Enter after payment is complete" required error={paymentTxnError} />
+
+              <Btn onClick={() => submitPayment({ member: createdMember, plan, registrationFee, depositFee, subscriptionFee })} variant="primary" size="lg" icon="check" disabled={!paymentTxnId.trim() || paymentSubmitting} style={{ width: "100%", justifyContent: "center" }}>
+                {paymentSubmitting ? "Submitting…" : "Submit"}
+              </Btn>
+            </div>
+          );
+        })()}
+
+        {step === "success" && createdMember && (
+          <div style={{ padding: "24px 28px 28px", textAlign: "center" }}>
+            <div style={{ width: 64, height: 64, background: "#D5F5E3", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px" }}>
+              <Icon name="check" size={32} color="#27AE60" />
+            </div>
+            <h2 style={{ color: C.green, margin: "0 0 10px" }}>Registration Submitted!</h2>
+            <p style={{ color: C.gray600, margin: "0 0 6px", fontSize: 14, lineHeight: 1.6 }}>
+              Congratulations <strong style={{ color: C.green }}>{createdMember.name}</strong>! Your request has been sent to the librarian for approval.
+            </p>
+            <p style={{ color: C.gray600, margin: "0 0 20px", fontSize: 13 }}>
+              Member ID: <strong style={{ fontFamily: "monospace" }}>{createdMember.membershipId}</strong>
+            </p>
+            <Btn onClick={onBack} variant="primary" style={{ margin: "0 auto", display: "block" }}>Go to Sign In</Btn>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -5232,7 +5464,7 @@ export default function App() {
 
   // ── Route guards ──
   if (page === "login")    return <LoginPage onLogin={login} onRegister={() => navigate("register")} initialTab={pageParams.tab || "member"} />;
-  if (page === "register") return <RegisterPage onRegisterSuccess={handleRegister} onBack={goToLogin} settings={settings} />;
+  if (page === "register") return <RegisterPage onRegisterSuccess={handleRegister} onBack={goToLogin} settings={settings} members={members} branches={branches} />;
   if ((page === "admin" || page === "librarian" || page === "member") && !user) return <LoginPage onLogin={login} onRegister={() => navigate("register")} />;
 
   return (
