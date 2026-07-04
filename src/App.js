@@ -1919,8 +1919,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   // Matches the "MMM YYYY" text format already used in the status table's last_paid_month column (e.g. "Oct 2023")
   const monthYearLabel = (year, monthIndex) => new Date(year, monthIndex, 1).toLocaleString("en-US", { month: "short", year: "numeric" });
   // Only track members whose status-table status is some flavor of Active (Active, Active - Last
-  // Month, Active - Late) — Paused, Closed*, Default*, In Library Reading, Volunteer, EWS are suppressed.
-  const INCLUDED_RENEWAL_STATUS = /^active/i;
+  // Month, Active - Late) or Default — Paused, Closed*, In Library Reading, Volunteer, EWS are suppressed.
+  const INCLUDED_RENEWAL_STATUS = /^(active|default)/i;
   const renewalCurrentMonthStart = new Date();
   renewalCurrentMonthStart.setDate(1);
   renewalCurrentMonthStart.setHours(0, 0, 0, 0);
