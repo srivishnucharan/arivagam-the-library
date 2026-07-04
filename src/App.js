@@ -1931,16 +1931,20 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       if (!member || member.status !== "active") return null;
       const paidDate = s.lastPaidMonth ? new Date(s.lastPaidMonth) : null;
       const validPaidDate = paidDate && !isNaN(paidDate) ? paidDate : null;
-      if (validPaidDate && validPaidDate >= renewalCurrentMonthStart) return null; // already paid for this month
+      const subscriptionCurrent = !!(validPaidDate && validPaidDate >= renewalCurrentMonthStart);
       const dueBase = validPaidDate ? new Date(validPaidDate) : new Date(member.joined || today());
       dueBase.setMonth(dueBase.getMonth() + 1);
       // Months strictly before this one that are still unpaid = arrears; this month's charge is separate.
       const monthlyCost = resolvePlan(member.plan)?.cost || 0;
-      const overdueMonths = Math.max(0, monthDiff(dueBase, renewalCurrentMonthStart));
+      const overdueMonths = subscriptionCurrent ? 0 : Math.max(0, monthDiff(dueBase, renewalCurrentMonthStart));
       const overdueAmount = overdueMonths * monthlyCost;
-      const dueThisMonthAmount = monthlyCost;
-      const totalOutstanding = overdueAmount + dueThisMonthAmount;
-      return { ...member, renewalDue: dueBase.toISOString().split("T")[0], statusLastPaidMonth: s.lastPaidMonth, overdueMonths, overdueAmount, dueThisMonthAmount, totalOutstanding };
+      const dueThisMonthAmount = subscriptionCurrent ? 0 : monthlyCost;
+      const penaltyFees = member.fees || 0;
+      const totalOutstanding = overdueAmount + dueThisMonthAmount + penaltyFees;
+      // Include the member if they owe anything at all — subscription arrears or leftover penalty
+      // fees even when their subscription itself is already paid up for this month.
+      if (totalOutstanding <= 0) return null;
+      return { ...member, renewalDue: dueBase.toISOString().split("T")[0], statusLastPaidMonth: s.lastPaidMonth, overdueMonths, overdueAmount, dueThisMonthAmount, penaltyFees, totalOutstanding };
     })
     .filter(Boolean)
     .sort((a, b) => new Date(a.renewalDue) - new Date(b.renewalDue));
@@ -3423,8 +3427,10 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
           const dueDate = new Date(m.renewalDue || today());
           const monthLabel = dueDate.toLocaleString("en-IN", { month: "short" }) + " " + dueDate.getFullYear();
           const amountLine = m.overdueMonths > 0
-            ? `Overdue: ₹${m.overdueAmount.toLocaleString()} (${m.overdueMonths} month${m.overdueMonths > 1 ? "s" : ""}) + This month: ₹${m.dueThisMonthAmount.toLocaleString()}\n*Total Due: ₹${m.totalOutstanding.toLocaleString()}*`
-            : `Amount: *₹${m.dueThisMonthAmount}/month*`;
+            ? `Overdue: ₹${m.overdueAmount.toLocaleString()} (${m.overdueMonths} month${m.overdueMonths > 1 ? "s" : ""}) + This month: ₹${m.dueThisMonthAmount.toLocaleString()}${m.penaltyFees > 0 ? ` + Penalty: ₹${m.penaltyFees.toLocaleString()}` : ""}\n*Total Due: ₹${m.totalOutstanding.toLocaleString()}*`
+            : m.penaltyFees > 0
+              ? `Penalty fees due: *₹${m.penaltyFees.toLocaleString()}*\n*Total Due: ₹${m.totalOutstanding.toLocaleString()}*`
+              : `Amount: *₹${m.dueThisMonthAmount}/month*`;
           const msg = `Hi ${m.name.split(" ")[0]}, your *${plan?.name || "membership"}* at *${localSettings.library?.name || "the library"}* is due for renewal on *${m.renewalDue}* (${monthLabel}).\n\n${amountLine}\n\n${upiLink ? `Pay now 👇\n${upiLink}\n\n` : ""}Pay using the UPI id shared to avoid Late fees and Notify the Librarian after payment. Thanks!! 🙏`;
           return `https://wa.me/${phone.startsWith("91") ? phone : "91" + phone}?text=${encodeURIComponent(msg)}`;
         };
@@ -3473,6 +3479,11 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 {m.overdueMonths > 0 && (
                   <div style={{ fontSize: 11, color: C.red, marginTop: 3 }}>
                     ₹{m.overdueAmount.toLocaleString()} overdue + ₹{m.dueThisMonthAmount.toLocaleString()} this month
+                  </div>
+                )}
+                {m.penaltyFees > 0 && (
+                  <div style={{ fontSize: 11, color: C.red, marginTop: 3 }}>
+                    ₹{m.penaltyFees.toLocaleString()} penalty fees due
                   </div>
                 )}
                 <div style={{ fontSize: 13, fontWeight: 800, color: C.gray900, marginTop: 2 }}>
