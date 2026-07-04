@@ -924,7 +924,11 @@ const LoginPage = ({ onLogin, onRegister, initialTab = "member" }) => {
         setError("Incorrect password.");
         return;
       }
-      if (found.status !== "active") { setError("Your account is inactive. Contact admin."); return; }
+      // users.status is unreliable/blank for many existing accounts (across all roles) — activation_status
+      // is the authoritative field. Only block login when one of them explicitly says not-active;
+      // treat both being blank as active rather than locking out accounts that were never stamped.
+      const accountActivation = (found.activation_status || found.status || "").trim().toLowerCase();
+      if (accountActivation && accountActivation !== "active") { setError("Your account is inactive. Contact admin."); return; }
       onLogin(dbToUser(found));
     } catch (err) {
       setError("Unable to connect. Please check your internet and try again.");
@@ -2332,12 +2336,27 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       setMembers(members.map(m => m.id === memberId ? mapped : m));
       activatedMember = mapped;
       showToast(`Membership activated! ID: ${mapped.membershipId || memberId}`);
-      // Flip the status-table row from Pending to Active now that the librarian has confirmed
+      // Flip the status-table row from Pending to Active now that the librarian has confirmed.
+      // .update() matching zero rows succeeds silently, so check the row count and insert a
+      // fresh row when none existed yet (e.g. a pending member added before the status row
+      // was ever created) — otherwise the status table quietly never gets touched.
       if (mapped.membershipId) {
         try {
-          await supabase.from("status").update({ status: "Active" }).eq("member_id", mapped.membershipId);
-          setMemberStatuses(prev => prev.map(s => s.memberId === mapped.membershipId ? { ...s, status: "Active" } : s));
-        } catch { /* status row may not exist yet (e.g. offline member) — safe to skip */ }
+          const { data: updated, error: statusErr } = await supabase.from("status")
+            .update({ status: "Active" })
+            .eq("member_id", mapped.membershipId)
+            .select();
+          if (statusErr) throw statusErr;
+          if (updated && updated.length > 0) {
+            setMemberStatuses(prev => prev.map(s => s.memberId === mapped.membershipId ? { ...s, status: "Active" } : s));
+          } else {
+            const { data: inserted, error: insertErr } = await supabase.from("status")
+              .insert({ member_id: mapped.membershipId, member_name: mapped.name, status: "Active" })
+              .select();
+            if (insertErr) throw insertErr;
+            if (inserted?.[0]) setMemberStatuses(prev => [...prev, dbToMemberStatus(inserted[0])]);
+          }
+        } catch { /* status table write failed — users.status/activation_status already succeeded above */ }
       }
     } catch {
       const offlineMember = { ...pendingMember, status: "active", activationStatus: "active", plan: planId || pendingMember?.plan || null };
@@ -2428,15 +2447,42 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const openEditMember = (m) => { setEditMember(m); setMemberForm({ name: m.name, email: m.email, phone: m.phone || "", altPhone: m.altPhone || "", enrollmentDate: m.enrollmentDate || "", childMemberName: m.childMemberName || "", childMemberDOB: m.childMemberDOB || "", guardianName: m.guardianName || "", relationshipToMember: m.relationshipToMember || "", address: m.address || "", upiId: m.upiId || "", paymentMethod: m.paymentMethod || "", registrationFees: m.registrationFees || "", offerType: m.offerType || "", refundableDeposit: m.refundableDeposit || "", branch: m.branch || "", membershipType: m.membershipType || "annual", plan: m.plan || "", planDescription: m.planDescription || "", status: m.status, password: m.password || "", comments: m.comments || "" }); setMemberFormStep("form"); setShowMemberForm(true); };
 
   // ── LIBRARIAN CRUD ──
-  const saveLib = () => {
+  const saveLib = async () => {
     if (!libForm.name.trim() || !libForm.email.trim()) { showToast("Name and Email are required.", "error"); return; }
+    const autoPassword = libForm.password.trim() || libForm.name.split(" ")[0].toLowerCase() + Math.floor(1000 + Math.random() * 9000);
     if (editLib) {
-      setLibrarians(librarians.map(l => l.id === editLib.id ? { ...editLib, ...libForm } : l));
-      showToast("Librarian updated.");
+      try {
+        const updateData = {
+          child_member_name: libForm.name, email_id: libForm.email,
+          phone_number: libForm.phone || null, branch_id: libForm.branch || null,
+          status: libForm.status,
+        };
+        if (libForm.password.trim()) updateData.password = libForm.password.trim();
+        const { data, error } = await supabase.from("users").update(updateData).eq("id", editLib.id).select().single();
+        if (error) throw error;
+        setLibrarians(librarians.map(l => l.id === editLib.id ? dbToUser(data) : l));
+        showToast("Librarian updated.");
+      } catch {
+        setLibrarians(librarians.map(l => l.id === editLib.id ? { ...editLib, ...libForm } : l));
+        showToast("Librarian updated (offline).");
+      }
     } else {
-      const id = nextId(librarians, "LIB");
-      setLibrarians([...librarians, { ...libForm, id, joined: today() }]);
-      showToast(`Librarian "${libForm.name}" added with ID ${id}.`);
+      try {
+        const insertData = {
+          child_member_name: libForm.name, email_id: libForm.email,
+          phone_number: libForm.phone || null, branch_id: libForm.branch || null,
+          status: libForm.status, password: autoPassword, role: "librarian",
+        };
+        const { data, error } = await supabase.from("users").insert(insertData).select().single();
+        if (error) throw error;
+        const mapped = dbToUser(data);
+        setLibrarians([...librarians, mapped]);
+        showToast(`Librarian "${libForm.name}" added. Password: ${autoPassword}`);
+      } catch {
+        const id = nextId(librarians, "LIB");
+        setLibrarians([...librarians, { ...libForm, id, password: autoPassword, joined: today() }]);
+        showToast(`Librarian "${libForm.name}" added (offline). Password: ${autoPassword}`);
+      }
     }
     setShowLibForm(false); setEditLib(null); setLibForm(emptyLib);
   };
