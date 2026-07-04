@@ -99,6 +99,9 @@ const dbToMemberStatus = (s) => ({
   lastPaidMonth: s.last_paid_month || "",
   booksWithMember: s.number_of_books_with_member || "",
 });
+const dbToBranch = (b) => ({
+  id: b.id, name: b.name || "", address: b.address || "", status: b.status || "active",
+});
 const dbToPayment = (p) => ({
   id: p.id, date: p.date || "",
   memberId: p.member_id || "",
@@ -1859,7 +1862,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const defaultBranchId = (branches.find(b => /main/i.test(b.name || "")) || branches[0] || {}).id || "";
   const emptyMember  = { name: "", email: "", phone: "", altPhone: "", enrollmentDate: today(), childMemberName: "", childMemberDOB: "", guardianName: "", relationshipToMember: "", address: "", upiId: "", paymentMethod: "upi", registrationFees: "250", offerType: "", refundableDeposit: "", branch: defaultBranchId, membershipType: "monthly", plan: "", planDescription: "", status: "pending", password: "", comments: "" };
   const emptyLib     = { name: "", email: "", phone: "", branch: "Main", status: "active", password: "" };
-  const emptyBranch  = { name: "", address: "", librarian: "" };
+  const emptyBranch  = { name: "", address: "" };
 
   const [bookForm,   setBookForm]   = useState(emptyBook);
   const [memberForm, setMemberForm] = useState(emptyMember);
@@ -4077,16 +4080,18 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
             <Btn variant="primary" icon="plus" onClick={() => setShowBranchForm(true)}>New Branch</Btn>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            {branches.map(b => (
+            {branches.map(b => {
+              const branchMemberCount = members.filter(m => String(m.branch) === String(b.id)).length;
+              const branchLibrarians = librarians.filter(l => String(l.branch) === String(b.id)).map(l => l.name);
+              return (
               <div key={b.id} style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 12, padding: "18px 22px" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 10 }}>
                   <div>
                     <div style={{ fontWeight: 800, color: C.green, fontSize: 16, marginBottom: 4 }}>{b.name}</div>
                     <div style={{ fontSize: 13, color: C.gray600, marginBottom: 8, maxWidth: 480 }}>{b.address}</div>
                     <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                      <span style={{ fontSize: 13, color: C.gray600 }}>📚 {b.books} books</span>
-                      <span style={{ fontSize: 13, color: C.gray600 }}>👥 {b.members} members</span>
-                      <span style={{ fontSize: 13, color: C.gray600 }}>Librarian: {b.librarian}</span>
+                      <span style={{ fontSize: 13, color: C.gray600 }}>👥 {branchMemberCount} members</span>
+                      <span style={{ fontSize: 13, color: C.gray600 }}>Librarian: {branchLibrarians.length ? branchLibrarians.join(", ") : "Unassigned"}</span>
                     </div>
                   </div>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -4095,7 +4100,8 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                   </div>
                 </div>
               </div>
-            ))}
+              );
+            })}
             {/* New branch CTA */}
             <div style={{ background: C.gold + "15", border: `2px dashed ${C.gold}`, borderRadius: 12, padding: "28px", textAlign: "center" }}>
               <Icon name="branch" size={32} color={C.goldDark} />
@@ -4444,14 +4450,22 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
         </div>
         <Input label="Branch Name" value={branchForm.name} onChange={e => setBranchForm({ ...branchForm, name: e.target.value })} placeholder="e.g. T.Nagar Branch" required />
         <Input label="Address" value={branchForm.address} onChange={e => setBranchForm({ ...branchForm, address: e.target.value })} placeholder="Full street address" />
-        <Input label="Assigned Librarian" value={branchForm.librarian} onChange={e => setBranchForm({ ...branchForm, librarian: e.target.value })} placeholder="Librarian name" />
         <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
-          <Btn onClick={() => {
+          <Btn onClick={async () => {
             if (!branchForm.name.trim()) { showToast("Branch name required.", "error"); return; }
-            const id = nextId(branches, "BR");
-            setBranches([...branches, { ...branchForm, id, status: "active", books: 0, members: 0 }]);
+            try {
+              const { data, error } = await supabase.from("branches")
+                .insert({ name: branchForm.name, address: branchForm.address || null, status: "active" })
+                .select().single();
+              if (error) throw error;
+              setBranches([...branches, dbToBranch(data)]);
+              showToast(`Branch "${branchForm.name}" created!`);
+            } catch (err) {
+              console.error("saveBranch: branches.insert failed —", err?.message || err);
+              showToast(`Could not create branch "${branchForm.name}" — it was not saved.`, "error");
+              return;
+            }
             setShowBranchForm(false); setBranchForm(emptyBranch);
-            showToast(`Branch "${branchForm.name}" created!`);
           }} variant="primary">Create Branch</Btn>
           <Btn onClick={() => setShowBranchForm(false)} variant="ghost">Cancel</Btn>
         </div>
@@ -4988,17 +5002,32 @@ export default function App() {
     };
     const load = async () => {
       try {
-        const [usersRes, txnsRes, reqsRes, feeRes, waitRes, statusRes, booksData, copiesData, paymentsData] = await Promise.all([
+        const [usersRes, txnsRes, reqsRes, feeRes, waitRes, statusRes, branchesRes, booksData, copiesData, paymentsData] = await Promise.all([
           supabase.from("users").select("*").order("child_member_name"),
           supabase.from("transactions").select("*, users!member_id(child_member_name), books!book_id(title), book_copies!copy_id(accession_number)"),
           supabase.from("borrow_requests").select("*").order("created_at", { ascending: false }),
           supabase.from("fee_settings").select("*").limit(1).maybeSingle(),
           supabase.from("book_waitlist").select("*").order("position"),
           supabase.from("status").select("*"),
+          supabase.from("branches").select("*").order("name"),
           fetchAllRows(() => supabase.from("books").select("*").eq("status", "active").order("title").order("id")),
           fetchAllRows(() => supabase.from("book_copies").select("*").order("accession_number").order("id")),
           fetchAllRows(() => supabase.from("payments").select("*").order("date", { ascending: false }).order("id")),
         ]);
+        if (branchesRes.data?.length) {
+          setBranches(branchesRes.data.map(dbToBranch));
+        } else if (branchesRes.data) {
+          // First run after the branches table was created — seed it once with the default branch(es)
+          try {
+            const { data: seeded, error: seedErr } = await supabase.from("branches")
+              .insert(SEED_BRANCHES.map(b => ({ name: b.name, address: b.address, status: b.status })))
+              .select();
+            if (seedErr) throw seedErr;
+            if (seeded?.length) setBranches(seeded.map(dbToBranch));
+          } catch (err) {
+            console.warn("branches seed failed:", err.message);
+          }
+        }
         if (booksData.length)       setBooks(booksData.map(dbToBook));
         if (usersRes.data?.length) {
           setMembers(usersRes.data.filter(u => u.role === "member").map(dbToUser));
