@@ -3782,7 +3782,12 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 <span style={{ color: C.white, fontWeight: 800, fontSize: 15 }}>{m.name.charAt(0).toUpperCase()}</span>
               </div>
               <div style={{ flex: 1, minWidth: 180 }}>
-                <div style={{ fontWeight: 700, color: C.gray900, fontSize: 14 }}>{m.name}</div>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>
+                  <span onClick={() => { setTab("members"); setSelectedMember(m); }} title="View member profile"
+                    style={{ cursor: "pointer", color: C.green, textDecoration: "underline" }}>
+                    {m.membershipId ? `${m.membershipId} — ${m.name}` : m.name}
+                  </span>
+                </div>
                 <div style={{ fontSize: 12, color: C.gray600 }}>{m.email}{m.phone ? ` · ${m.phone}` : ""}</div>
                 <div style={{ fontSize: 12, marginTop: 3 }}>
                   <span style={{ fontWeight: 600, color: C.blue }}>{plan?.name || "Unknown Plan"}</span>
