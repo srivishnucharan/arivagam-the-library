@@ -175,6 +175,20 @@ const DEFAULT_CATID_FIELDS = { catalogueNo: true, genre: true, language: true, c
 // Fallback password for members imported without one set (e.g. bulk CSV/DB loads) — lets them log in until the librarian sets a real password.
 const DEFAULT_MEMBER_PASSWORD = "User@123";
 
+// Default password for new members who don't choose their own: first 4 letters of their
+// name (skipping a lone initial like "A." in "A.Arun") + their date of birth as mmdd.
+// e.g. "A.Arun" + 2015-02-07 -> "Arun0207"; "Rajesh Ravi" + 2011-12-08 -> "Raje1208".
+const deriveDefaultPassword = (name, dob) => {
+  if (!name || !dob) return "";
+  const tokens = name.trim().split(/[\s.]+/).filter(Boolean);
+  const nameToken = tokens.find(t => t.length > 1) || tokens[0];
+  if (!nameToken) return "";
+  const namePart = nameToken[0].toUpperCase() + nameToken.slice(1, 4).toLowerCase();
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(dob);
+  if (!m) return "";
+  return `${namePart}${m[2]}${m[3]}`;
+};
+
 // ─── DEFAULT SETTINGS ─────────────────────────────────────────────────────────
 const DEFAULT_PLANS = [
   { id: "plan-basic",   name: "Leisure Reader",    borrowLimit: 2, cost: 300,  refundableDeposit: 500  },
@@ -1031,7 +1045,7 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
     branch: "", membershipType: "monthly", planDescription: "", comments: "",
     password: "", confirm: "",
   });
-  const [selectedPlanId, setSelectedPlanId] = useState(plans[0]?.id || "");
+  const [selectedPlanId, setSelectedPlanId] = useState("");
   const [errors, setErrors] = useState({});
   const [step, setStep] = useState("form"); // "form" | "payment" | "success"
   const [createdMember, setCreatedMember] = useState(null);
@@ -1051,7 +1065,7 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
 
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
 
-  const selectedPlan = plans.find(p => p.id === selectedPlanId) || plans[0];
+  const selectedPlan = plans.find(p => p.id === selectedPlanId);
 
   const validate = () => {
     const e = {};
@@ -1059,8 +1073,12 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
     if (!form.email.includes("@")) e.email = "Enter a valid email.";
     if (!form.phone.trim() || !/^\d{10}$/.test(form.phone.replace(/\s/g, ""))) e.phone = "Enter a 10-digit phone number.";
     if (!form.address.trim()) e.address = "Address is required.";
+    if (!form.childMemberName.trim()) e.childMemberName = "Child member name is required.";
+    if (!form.childMemberDOB) e.childMemberDOB = "Child date of birth is required.";
+    if (!form.guardianName.trim()) e.guardianName = "Parent/guardian name is required.";
+    if (!form.relationshipToMember.trim()) e.relationshipToMember = "Relationship to member is required.";
     if (!selectedPlanId) e.plan = "Membership Plan is required.";
-    if (form.password.length < 6) e.password = "Password must be at least 6 characters.";
+    if (form.password && form.password.length < 6) e.password = "Password must be at least 6 characters.";
     if (form.password !== form.confirm) e.confirm = "Passwords do not match.";
     return e;
   };
@@ -1081,6 +1099,7 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
     if (Object.keys(e).length) { setErrors(e); return; }
     setErrors({});
     const newMembershipId = computeNextMembershipId();
+    const finalPassword = form.password.trim() || deriveDefaultPassword(form.name, form.childMemberDOB) || DEFAULT_MEMBER_PASSWORD;
     const insertData = {
       child_member_name: form.name.trim(),
       email_id: form.email.trim().toLowerCase(),
@@ -1097,7 +1116,7 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
       offer_type: form.offerType || null,
       refundable_deposit: form.refundableDeposit !== "" ? parseFloat(form.refundableDeposit) : null,
       branch_id: form.branch || null,
-      password: form.password,
+      password: finalPassword,
       role: "member",
       activation_status: "pending",
       membership_id: newMembershipId,
@@ -1119,7 +1138,7 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
       const offlineMember = {
         id: "PENDING_" + Date.now(), membershipId: newMembershipId,
         name: form.name.trim(), email: form.email.trim().toLowerCase(),
-        phone: form.phone.trim(), password: form.password,
+        phone: form.phone.trim(), password: finalPassword,
         plan: selectedPlanId,
         membershipType: selectedPlan?.inhouseOnly ? "inhouse" : form.membershipType,
         status: "pending", joined: today(), fees: 0,
@@ -1203,12 +1222,12 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
             </div>
 
             {/* ── Child Member ── */}
-            <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Child Member (if applicable)</div>
+            <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Child Member</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
-              <Input label="Child Member Name" value={form.childMemberName} onChange={set("childMemberName")} placeholder="Child's full name" />
-              <Input label="Child Date of Birth" type="date" value={form.childMemberDOB} onChange={set("childMemberDOB")} />
-              <Input label="Parent / Guardian Name" value={form.guardianName} onChange={set("guardianName")} placeholder="Guardian's name" />
-              <Input label="Relationship to Member" value={form.relationshipToMember} onChange={set("relationshipToMember")} placeholder="e.g. Father, Mother" />
+              <Input label="Child Member Name" value={form.childMemberName} onChange={set("childMemberName")} placeholder="Child's full name" required error={errors.childMemberName} />
+              <Input label="Child Date of Birth" type="date" value={form.childMemberDOB} onChange={set("childMemberDOB")} required error={errors.childMemberDOB} />
+              <Input label="Parent / Guardian Name" value={form.guardianName} onChange={set("guardianName")} placeholder="Guardian's name" required error={errors.guardianName} />
+              <Input label="Relationship to Member" value={form.relationshipToMember} onChange={set("relationshipToMember")} placeholder="e.g. Father, Mother" required error={errors.relationshipToMember} />
             </div>
 
             {/* ── Membership Plan ── */}
@@ -1230,9 +1249,10 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
                   membershipType: chosenPlan ? (chosenPlan.inhouseOnly ? "inhouse" : "monthly") : f.membershipType,
                 }));
               }}
-                style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none", background: C.white, color: C.gray900 }}
+                style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${errors.plan ? C.red : C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none", background: C.white, color: C.gray900 }}
                 onFocus={e => e.target.style.borderColor = C.green}
-                onBlur={e => e.target.style.borderColor = C.gray300}>
+                onBlur={e => e.target.style.borderColor = errors.plan ? C.red : C.gray300}>
+                <option value="">— Select a plan —</option>
                 {plans.map(p => (
                   <option key={p.id} value={p.id}>
                     {p.inhouseOnly
@@ -1241,6 +1261,7 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
                   </option>
                 ))}
               </select>
+              {errors.plan && <p style={{ fontSize: 11, color: C.red, margin: "4px 0 0" }}>{errors.plan}</p>}
             </div>
 
             {selectedPlan && (
@@ -1297,12 +1318,13 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
 
             <div style={{ height: 1, background: C.gray100, margin: "4px 0 16px" }} />
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
-              <Input label="Password" type="password" value={form.password} onChange={set("password")} placeholder="At least 6 characters" icon="lock" required error={errors.password} />
-              <Input label="Confirm Password" type="password" value={form.confirm} onChange={set("confirm")} placeholder="Re-enter password" icon="lock" required error={errors.confirm} />
+              <Input label="Password" type="password" value={form.password} onChange={set("password")} placeholder="Leave blank to auto-generate" icon="lock" hint="Leave blank for a default password" error={errors.password} />
+              <Input label="Confirm Password" type="password" value={form.confirm} onChange={set("confirm")} placeholder="Re-enter password" icon="lock" error={errors.confirm} />
             </div>
 
             <div style={{ background: C.goldLight, borderRadius: 8, padding: "10px 14px", fontSize: 12, color: C.green, fontWeight: 600, marginBottom: 18 }}>
               <Icon name="info" size={13} color={C.goldDark} /> Membership is activated by a librarian. You can browse books after registration, but borrowing requires an active membership.
+              {" "}If you leave the password blank, a default password is generated from your name and child's date of birth (first 4 letters of the name + DOB as MMDD).
             </div>
 
             <Btn onClick={handleSubmit} variant="primary" size="lg" style={{ width: "100%", justifyContent: "center" }}>
@@ -1395,9 +1417,14 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
             <p style={{ color: C.gray600, margin: "0 0 6px", fontSize: 14, lineHeight: 1.6 }}>
               Congratulations <strong style={{ color: C.green }}>{createdMember.name}</strong>! Your request has been sent to the librarian for approval.
             </p>
-            <p style={{ color: C.gray600, margin: "0 0 20px", fontSize: 13 }}>
+            <p style={{ color: C.gray600, margin: form.password.trim() ? "0 0 20px" : "0 0 6px", fontSize: 13 }}>
               Member ID: <strong style={{ fontFamily: "monospace" }}>{createdMember.membershipId}</strong>
             </p>
+            {!form.password.trim() && (
+              <p style={{ color: C.gray600, margin: "0 0 20px", fontSize: 13 }}>
+                Your default password is: <strong style={{ fontFamily: "monospace" }}>{createdMember.password}</strong>
+              </p>
+            )}
             <Btn onClick={onBack} variant="primary" style={{ margin: "0 auto", display: "block" }}>Go to Sign In</Btn>
           </div>
         )}
@@ -2395,8 +2422,14 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     if (!memberForm.name.trim() || !memberForm.email.trim()) { showToast("Name and Email are required.", "error"); return; }
     if (!memberForm.phone.trim()) { showToast("Phone is required.", "error"); return; }
     if (!memberForm.address.trim()) { showToast("Address is required.", "error"); return; }
+    if (!memberForm.childMemberName.trim()) { showToast("Child Member Name is required.", "error"); return; }
+    if (!memberForm.childMemberDOB) { showToast("Child Date of Birth is required.", "error"); return; }
+    if (!memberForm.guardianName.trim()) { showToast("Parent / Guardian Name is required.", "error"); return; }
+    if (!memberForm.relationshipToMember.trim()) { showToast("Relationship to Member is required.", "error"); return; }
     if (!memberForm.plan) { showToast("Membership Plan is required.", "error"); return; }
-    const autoPassword = memberForm.password.trim() || memberForm.name.split(" ")[0].toLowerCase() + Math.floor(1000 + Math.random() * 9000);
+    const autoPassword = memberForm.password.trim()
+      || deriveDefaultPassword(memberForm.name, memberForm.childMemberDOB)
+      || memberForm.name.split(" ")[0].toLowerCase() + Math.floor(1000 + Math.random() * 9000);
     if (editMember) {
       try {
         const updateData = {
@@ -4486,12 +4519,12 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
             </div>
 
             {/* ── Child Member ── */}
-            <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Child Member (if applicable)</div>
+            <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, marginTop: 4 }}>Child Member</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
-              <Input label="Child Member Name" value={memberForm.childMemberName} onChange={e => setMemberForm({ ...memberForm, childMemberName: e.target.value })} placeholder="Child's full name" />
-              <Input label="Child Date of Birth" type="date" value={memberForm.childMemberDOB} onChange={e => setMemberForm({ ...memberForm, childMemberDOB: e.target.value })} />
-              <Input label="Parent / Guardian Name" value={memberForm.guardianName} onChange={e => setMemberForm({ ...memberForm, guardianName: e.target.value })} placeholder="Guardian's name" />
-              <Input label="Relationship to Member" value={memberForm.relationshipToMember} onChange={e => setMemberForm({ ...memberForm, relationshipToMember: e.target.value })} placeholder="e.g. Father, Mother" />
+              <Input label="Child Member Name" value={memberForm.childMemberName} onChange={e => setMemberForm({ ...memberForm, childMemberName: e.target.value })} placeholder="Child's full name" required />
+              <Input label="Child Date of Birth" type="date" value={memberForm.childMemberDOB} onChange={e => setMemberForm({ ...memberForm, childMemberDOB: e.target.value })} required />
+              <Input label="Parent / Guardian Name" value={memberForm.guardianName} onChange={e => setMemberForm({ ...memberForm, guardianName: e.target.value })} placeholder="Guardian's name" required />
+              <Input label="Relationship to Member" value={memberForm.relationshipToMember} onChange={e => setMemberForm({ ...memberForm, relationshipToMember: e.target.value })} placeholder="e.g. Father, Mother" required />
             </div>
 
             {/* ── Payment ── */}
@@ -4555,7 +4588,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 { value: "pending",   label: "Pending"   },
                 { value: "suspended", label: "Suspended" },
               ]} />
-              <Input label="Password" type="password" value={memberForm.password} onChange={e => setMemberForm({ ...memberForm, password: e.target.value })} placeholder="Set login password" icon="lock" hint="Leave blank to auto-generate" />
+              <Input label="Password" type="password" value={memberForm.password} onChange={e => setMemberForm({ ...memberForm, password: e.target.value })} placeholder="Set login password" icon="lock" hint="Leave blank to default to name + child's DOB (MMDD)" />
               <div style={{ marginBottom: 14 }}>
                 <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray600, marginBottom: 5, textTransform: "uppercase", letterSpacing: .5 }}>Member ID</label>
                 <div style={{ padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.gray200}`, background: C.gray50, fontSize: 14, fontFamily: "monospace", fontWeight: 700, color: C.green }}>
