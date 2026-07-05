@@ -172,6 +172,13 @@ const colorAbbr  = (c) => { const f = COLOR_CODES.find(x => x.code === c); retur
 
 const DEFAULT_CATID_FIELDS = { catalogueNo: true, genre: true, language: true, colorCode: true };
 
+// e.g. Standard Reader (2 books/₹250) -> "2 Books at a time: 250/month"; inhouse plans -> "In Library Reading Only: 0"
+const formatPlanDescription = (plan) => {
+  if (!plan) return "";
+  if (plan.inhouseOnly) return `${plan.name}: ${plan.cost}`;
+  return `${plan.borrowLimit} Book${plan.borrowLimit !== 1 ? "s" : ""} at a time: ${plan.cost}/month`;
+};
+
 // Fallback password for members imported without one set (e.g. bulk CSV/DB loads) — lets them log in until the librarian sets a real password.
 const DEFAULT_MEMBER_PASSWORD = "User@123";
 
@@ -1004,11 +1011,6 @@ const LoginPage = ({ onLogin, onRegister, initialTab = "member" }) => {
                 onFocus={e => e.target.style.borderColor = C.green}
                 onBlur={e => e.target.style.borderColor = C.gray300} />
             </div>
-            {tab === "member" && (
-              <p style={{ fontSize: 11, color: C.gray600, margin: "4px 0 0" }}>
-                First time signing in? Use the default password <strong>{DEFAULT_MEMBER_PASSWORD}</strong>.
-              </p>
-            )}
           </div>
 
           {error && <div style={{ background: C.redLight, color: C.red, borderRadius: 8, padding: "10px 14px", fontSize: 13, marginBottom: 16, fontWeight: 600 }}>{error}</div>}
@@ -1124,7 +1126,7 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
       fees_due: 0,
       membership_plan_description: form.planDescription || null,
       comments: form.comments || null,
-      membership_plan: selectedPlanId,
+      membership_plan: selectedPlan?.name || null,
     };
     try {
       const { data, error } = await supabase.from("users").insert(insertData).select().single();
@@ -1139,7 +1141,7 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
         id: "PENDING_" + Date.now(), membershipId: newMembershipId,
         name: form.name.trim(), email: form.email.trim().toLowerCase(),
         phone: form.phone.trim(), password: finalPassword,
-        plan: selectedPlanId,
+        plan: selectedPlan?.name || null,
         membershipType: selectedPlan?.inhouseOnly ? "inhouse" : form.membershipType,
         status: "pending", joined: today(), fees: 0,
       };
@@ -1243,9 +1245,7 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
                 setForm(f => ({
                   ...f,
                   refundableDeposit: chosenPlan ? String(chosenPlan.refundableDeposit || 0) : f.refundableDeposit,
-                  planDescription: chosenPlan
-                    ? (chosenPlan.inhouseOnly ? `${chosenPlan.name} — walk-in, no borrowing` : `${chosenPlan.name} — Borrow up to ${chosenPlan.borrowLimit} book${chosenPlan.borrowLimit !== 1 ? "s" : ""} · ₹${chosenPlan.cost}/month subscription`)
-                    : f.planDescription,
+                  planDescription: chosenPlan ? formatPlanDescription(chosenPlan) : f.planDescription,
                   membershipType: chosenPlan ? (chosenPlan.inhouseOnly ? "inhouse" : "monthly") : f.membershipType,
                 }));
               }}
@@ -1334,7 +1334,7 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
         )}
 
         {step === "payment" && createdMember && (() => {
-          const plan = plans.find(p => p.id === createdMember.plan) || selectedPlan;
+          const plan = plans.find(p => p.id === createdMember.plan || p.name === createdMember.plan) || selectedPlan;
           const registrationFee = parseFloat(form.registrationFees) || 0;
           const depositFee = parseFloat(form.refundableDeposit) || 0;
           const subscriptionFee = plan?.cost || 0;
@@ -2430,6 +2430,9 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     const autoPassword = memberForm.password.trim()
       || deriveDefaultPassword(memberForm.name, memberForm.childMemberDOB)
       || memberForm.name.split(" ")[0].toLowerCase() + Math.floor(1000 + Math.random() * 9000);
+    // membership_plan is stored as the plan's display name (e.g. "Standard Reader"), not its id.
+    const resolvedPlan = (settings.plans || DEFAULT_PLANS).find(p => p.id === memberForm.plan);
+    const membershipPlanName = resolvedPlan?.name || memberForm.plan;
     if (editMember) {
       try {
         const updateData = {
@@ -2452,7 +2455,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           comments: memberForm.comments || null,
         };
         if (memberForm.password.trim()) updateData.password = memberForm.password.trim();
-        if (memberForm.plan) updateData.membership_plan = memberForm.plan;
+        if (memberForm.plan) updateData.membership_plan = membershipPlanName;
         const { data, error } = await supabase.from("users").update(updateData).eq("id", editMember.id).select().single();
         if (error) throw error;
         setMembers(members.map(m => m.id === editMember.id ? dbToUser(data) : m));
@@ -2489,7 +2492,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         membership_plan_description: memberForm.planDescription || null,
         comments: memberForm.comments || null,
       };
-      if (memberForm.plan) insertData.membership_plan = memberForm.plan;
+      if (memberForm.plan) insertData.membership_plan = membershipPlanName;
       const { data, error } = await supabase.from("users").insert(insertData).select().single();
       if (error) throw error;
       const mapped = dbToUser(data);
@@ -4552,9 +4555,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 setMemberForm({
                   ...memberForm, plan: planId,
                   refundableDeposit: chosenPlan ? String(chosenPlan.refundableDeposit || 0) : memberForm.refundableDeposit,
-                  planDescription: chosenPlan
-                    ? (chosenPlan.inhouseOnly ? `${chosenPlan.name} — walk-in, no borrowing` : `${chosenPlan.name} — Borrow up to ${chosenPlan.borrowLimit} book${chosenPlan.borrowLimit !== 1 ? "s" : ""} · ₹${chosenPlan.cost}/month subscription`)
-                    : memberForm.planDescription,
+                  planDescription: chosenPlan ? formatPlanDescription(chosenPlan) : memberForm.planDescription,
                   membershipType: chosenPlan ? (chosenPlan.inhouseOnly ? "inhouse" : "monthly") : memberForm.membershipType,
                 });
               }} options={[
