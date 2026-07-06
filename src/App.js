@@ -3921,6 +3921,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
             p.memberId, member?.name, p.childMemberName,
             p.bookPlan, p.paymentMethod, p.paymentType,
             p.nextFeeMonth, p.fromAccount, p.panNo, p.date,
+            String(p.amountPaid),
           ].filter(Boolean).join(" ").toLowerCase();
           return haystack.includes(q);
         };
