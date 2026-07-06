@@ -172,6 +172,11 @@ const colorAbbr  = (c) => { const f = COLOR_CODES.find(x => x.code === c); retur
 
 const DEFAULT_CATID_FIELDS = { catalogueNo: true, genre: true, language: true, colorCode: true };
 
+// Non-membership revenue streams tracked via payments.payment_type. Only "PIE" has data
+// today, but all streams are listed here so the Revenue Streams view shows every category
+// (at ₹0) as soon as it exists, rather than only what's already in the table.
+const REVENUE_STREAM_TYPES = ["PIE", "arivArena", "Class", "Donation", "ONRP", "PATH", "Sponsor", "Workshop"];
+
 // e.g. Standard Reader (2 books/₹250) -> "2 Books at a time: 250/month"; inhouse plans -> "In Library Reading Only: 0"
 const formatPlanDescription = (plan) => {
   if (!plan) return "";
@@ -3976,6 +3981,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
             <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
               <button style={pillStyle(paymentsSubTab === "received")} onClick={() => setPaymentsSubTab("received")}>Payments Received</button>
               <button style={pillStyle(paymentsSubTab === "history")} onClick={() => setPaymentsSubTab("history")}>Payment History</button>
+              {isAdmin && <button style={pillStyle(paymentsSubTab === "streams")} onClick={() => setPaymentsSubTab("streams")}>Revenue Streams</button>}
             </div>
 
             {paymentsSubTab === "received" ? (() => {
@@ -3995,6 +4001,42 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                     <Input placeholder="Search member, plan, method (e.g. 2 Books)…" value={paymentSearch} onChange={e => setPaymentSearch(e.target.value)} />
                   </div>
                   {renderPaymentsTable(filtered, "Payments recorded this month will show up here.")}
+                </div>
+              );
+            })() : paymentsSubTab === "streams" && isAdmin ? (() => {
+              const streamPayments = (payments || []).filter(p => REVENUE_STREAM_TYPES.includes(p.paymentType));
+              const totalStreams = streamPayments.reduce((s, p) => s + p.amountPaid, 0);
+              const byType = REVENUE_STREAM_TYPES.map(streamType => {
+                const list = streamPayments.filter(p => p.paymentType === streamType);
+                return { streamType, count: list.length, total: list.reduce((s, p) => s + p.amountPaid, 0) };
+              });
+              const filtered = streamPayments
+                .filter(p => matchesSearch(p, members.find(m => m.membershipId === p.memberId)))
+                .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+              return (
+                <div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14, marginBottom: 20 }}>
+                    <StatCard label="Revenue Stream Entries" value={streamPayments.length} icon="rupee" color={C.green} />
+                    <StatCard label="Total Collected" value={`₹${totalStreams.toLocaleString()}`} icon="check" color={C.greenMid} />
+                  </div>
+                  <div className="revenue-tbl-scroll">
+                    <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 12, overflow: "hidden", marginBottom: 20 }}>
+                      <div className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr 1fr", padding: "10px 18px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase" }}>
+                        <span>Revenue Stream</span><span>Entries</span><span>Total Collected</span>
+                      </div>
+                      {byType.map((r, i) => (
+                        <div key={r.streamType} className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr 1fr", padding: "12px 18px", borderTop: `1px solid ${C.gray100}`, alignItems: "center", background: i % 2 === 0 ? C.white : C.gray50 }}>
+                          <span style={{ fontWeight: 700, color: C.green, fontSize: 14 }}>{r.streamType}</span>
+                          <span style={{ fontSize: 13, color: C.gray700 }}>{r.count}</span>
+                          <span style={{ fontSize: 14, fontWeight: 700, color: C.greenMid }}>₹{r.total.toLocaleString()}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{ marginBottom: 6 }}>
+                    <Input placeholder="Search member, plan, method…" value={paymentSearch} onChange={e => setPaymentSearch(e.target.value)} />
+                  </div>
+                  {renderPaymentsTable(filtered, "Revenue stream payments (PIE, arivArena, Class, Donation, ONRP, PATH, Sponsor, Workshop) will appear here as they're recorded.")}
                 </div>
               );
             })() : (() => {
