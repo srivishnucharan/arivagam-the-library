@@ -37,9 +37,9 @@ const bookToDB = (b) => ({
 const dbToUser = (u) => ({
   id: u.id, membershipId: u.membership_id || "",
   name: u.child_member_name, email: u.email_id, phone: u.phone_number || "",
-  // The users table no longer has a separate 'status' column — activation_status is now
+  // The users table no longer has a separate 'status' column — approval_status is now
   // authoritative, so mirror it into .status too (kept for the many existing call sites).
-  role: u.role, status: u.activation_status || "", activationStatus: u.activation_status || "", membershipType: u.membership_type || "annual",
+  role: u.role, status: u.approval_status || "", approvalStatus: u.approval_status || "", membershipType: u.membership_type || "annual",
   fees: parseFloat(u.fees_due) || 0,
   joined: u.joined_at ? u.joined_at.split("T")[0] : new Date().toISOString().split("T")[0],
   enrollmentDate: u.enrollment_date ? u.enrollment_date.split("T")[0] : "",
@@ -425,7 +425,7 @@ const BookCard = ({ book, onClick, bookCopies: _bookCopies, user, waitlist, requ
   const myWaitlistEntry = waitlist?.find(w => w.bookId === book.id && w.memberId === user?.id && (w.status === "waiting" || w.status === "reserved"));
   const bookWaitlist    = waitlist?.filter(w => w.bookId === book.id && w.status === "waiting") || [];
   const isReservedForMe = myWaitlistEntry?.status === "reserved";
-  const isMember        = user?.role === "member" && user?.status === "active";
+  const isMember        = user?.role === "member" && user?.status === "approved";
 
   // Action button config
   let btnLabel = null, btnBg = null, btnColor = null, btnBorder = null, btnHandler = null, btnTitle = null;
@@ -955,11 +955,15 @@ const LoginPage = ({ onLogin, onRegister, initialTab = "member" }) => {
         setError("Incorrect password.");
         return;
       }
-      // users.status is unreliable/blank for many existing accounts (across all roles) — activation_status
-      // is the authoritative field. Only block login when one of them explicitly says not-active;
-      // treat both being blank as active rather than locking out accounts that were never stamped.
-      const accountActivation = (found.activation_status || found.status || "").trim().toLowerCase();
-      if (accountActivation && accountActivation !== "active") { setError("Your account is inactive. Contact admin."); return; }
+      // users.status is unreliable/blank for many existing accounts (across all roles) — approval_status
+      // is the authoritative field. Librarian/admin accounts use "active"/"inactive"; members use
+      // "pending"/"approved"/"cancelled". Treat both being blank as active/approved rather than
+      // locking out accounts that were never stamped.
+      const accountApproval = (found.approval_status || found.status || "").trim().toLowerCase();
+      if (accountApproval && accountApproval !== "active" && accountApproval !== "approved") {
+        setError(accountApproval === "pending" ? "Your membership is awaiting librarian approval." : "Your account is inactive. Contact admin.");
+        return;
+      }
       onLogin(dbToUser(found));
     } catch (err) {
       setError("Unable to connect. Please check your internet and try again.");
@@ -1143,7 +1147,7 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
       branch_id: form.branch || null,
       password: finalPassword,
       role: "member",
-      activation_status: "pending",
+      approval_status: "pending",
       membership_id: newMembershipId,
       membership_type: selectedPlan?.inhouseOnly ? "inhouse" : form.membershipType,
       fees_due: 0,
@@ -1630,7 +1634,7 @@ const BookDetailModal = ({ book, onClose, user, onRequest, onWaitlist, transacti
   const pendingRequest  = requests?.some(r => r.memberId === user?.id && r.bookId === book.id && r.status === "pending");
   const myWaitlist      = waitlist?.find(w => w.bookId === book.id && w.memberId === user?.id && (w.status === "waiting" || w.status === "reserved"));
   const wlCount         = waitlist?.filter(w => w.bookId === book.id && w.status === "waiting").length || 0;
-  const memberActive    = user?.status === "active";
+  const memberActive    = user?.status === "approved";
   const canRequest      = user?.role === "member" && memberActive && book.available > 0 && !alreadyBorrowed && !pendingRequest;
   const canWaitlist     = user?.role === "member" && memberActive && book.available === 0 && !alreadyBorrowed && !myWaitlist;
 
@@ -1734,7 +1738,7 @@ const MemberDashboard = ({ user, books, transactions, requests, waitlist, settin
           <div style={{ flex: 1 }}>
             <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800 }}>{user.name}</h2>
             <p style={{ margin: "4px 0 0", opacity: .8, fontSize: 13 }}>
-              {user.status === "active" ? `Member ID: ${user.membershipId || user.id}` : "Membership Pending"}
+              {user.status === "approved" ? `Member ID: ${user.membershipId || user.id}` : "Membership Pending"}
             </p>
             {memberPlan && (
               <p style={{ margin: "4px 0 0", fontSize: 13, opacity: .9, fontWeight: 600 }}>
@@ -1744,12 +1748,12 @@ const MemberDashboard = ({ user, books, transactions, requests, waitlist, settin
               </p>
             )}
           </div>
-          <Badge label={user.status === "active" ? "Active Member" : "Pending Approval"} color={user.status === "active" ? C.gold : C.orange} size="lg" />
+          <Badge label={user.status === "approved" ? "Active Member" : "Pending Approval"} color={user.status === "approved" ? C.gold : C.orange} size="lg" />
         </div>
       </div>
 
       {/* ── Renewal Banner ── */}
-      {user.status === "active" && showRenewalBanner && (() => {
+      {user.status === "approved" && showRenewalBanner && (() => {
         const accentColor = renewalDiff < 0 ? C.red : "#E67E22";
         // QR encodes the UPI deep-link so any UPI app can open it by scanning
         const qrContent = upiLink || null;
@@ -2209,8 +2213,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     .filter(s => s.status && INCLUDED_RENEWAL_STATUS.test(s.status.trim()))
     .map(s => {
       const member = members.find(m => m.membershipId === s.memberId);
-      // users.status is unreliable for many rows — activation_status is the authoritative field
-      const isActiveMember = ((member?.activationStatus || member?.status || "").trim().toLowerCase() === "active");
+      // users.status is unreliable for many rows — approval_status is the authoritative field
+      const isActiveMember = ((member?.approvalStatus || member?.status || "").trim().toLowerCase() === "approved");
       if (!member || !isActiveMember) return null;
       const paidDate = s.lastPaidMonth ? new Date(s.lastPaidMonth) : null;
       const validPaidDate = paidDate && !isNaN(paidDate) ? paidDate : null;
@@ -2459,7 +2463,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           offer_type: memberForm.offerType || null,
           refundable_deposit: memberForm.refundableDeposit !== "" ? parseFloat(memberForm.refundableDeposit) : null,
           branch_id: memberForm.branch || null,
-          membership_type: memberForm.membershipType, activation_status: memberForm.status,
+          membership_type: memberForm.membershipType, approval_status: memberForm.status,
           membership_plan_description: memberForm.planDescription || null,
           comments: memberForm.comments || null,
         };
@@ -2513,7 +2517,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       offer_type: memberForm.offerType || null,
       refundable_deposit: memberForm.refundableDeposit !== "" ? parseFloat(memberForm.refundableDeposit) : null,
       branch_id: memberForm.branch || null,
-      password: autoPassword, role: "member", activation_status: memberForm.status,
+      password: autoPassword, role: "member", approval_status: memberForm.status,
       membership_id: newMembershipId,
       membership_type: memberForm.membershipType, fees_due: 0,
       membership_plan_description: memberForm.planDescription || null,
@@ -2577,7 +2581,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         const baseName = nameCol ? (row[nameCol] || "").trim() : "";
         const rec = {
           role: "member",
-          activation_status: "active",
+          approval_status: "approved",
           fees_due: 0,
           password: baseName ? baseName.split(" ")[0].toLowerCase() + Math.floor(1000 + Math.random() * 9000) : "member" + Math.floor(1000 + Math.random() * 9000),
         };
@@ -2617,7 +2621,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const deleteMember = async (id) => {
     if (!window.confirm("Delete this member?")) return;
     try {
-      const { error } = await supabase.from("users").update({ activation_status: "suspended" }).eq("id", id);
+      const { error } = await supabase.from("users").update({ approval_status: "cancelled" }).eq("id", id);
       if (error) throw error;
     } catch (err) { console.error("deleteMember: users.update failed —", err?.message || err); }
     setMembers(members.filter(m => m.id !== id));
@@ -2629,8 +2633,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     const pendingMember = members.find(m => m.id === memberId);
     try {
       // membership_id is assigned once at creation and is never reissued here.
-      // users.status no longer exists as a column — activation_status is the only one now.
-      const updateData = { activation_status: "active" };
+      // users.status no longer exists as a column — approval_status is the only one now.
+      const updateData = { approval_status: "approved" };
       if (planId) updateData.membership_plan = planId;
       const { data, error } = await supabase.from("users").update(updateData).eq("id", memberId).select().single();
       if (error) throw error;
@@ -2662,7 +2666,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       }
     } catch (err) {
       console.error("approveMember: users.update failed —", err?.message || err);
-      const offlineMember = { ...pendingMember, status: "active", activationStatus: "active", plan: planId || pendingMember?.plan || null };
+      const offlineMember = { ...pendingMember, status: "approved", approvalStatus: "approved", plan: planId || pendingMember?.plan || null };
       setMembers(members.map(m => m.id === memberId ? offlineMember : m));
       activatedMember = offlineMember;
       showToast(`Member approved locally only — database update failed (${err?.message || "unknown error"}). Check console.`, "error");
@@ -2672,6 +2676,38 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       supabase.functions.invoke("welcome-email", {
         body: { memberId: activatedMember.id },
       }).catch(() => {});
+    }
+  };
+
+  // Rejects a pending membership request. Mirrors approveMember, but flips approval_status
+  // to "cancelled" and the status-table row (if a payment was already submitted) to "Cancelled"
+  // instead of activating the member.
+  const cancelMember = async (memberId) => {
+    if (!window.confirm("Cancel this membership request?")) return;
+    const pendingMember = members.find(m => m.id === memberId);
+    try {
+      const { data, error } = await supabase.from("users").update({ approval_status: "cancelled" }).eq("id", memberId).select().single();
+      if (error) throw error;
+      const mapped = dbToUser(data);
+      setMembers(members.map(m => m.id === memberId ? mapped : m));
+      showToast(`Membership request cancelled for ${mapped.name || memberId}.`);
+      if (mapped.membershipId) {
+        try {
+          const { data: updated, error: statusErr } = await supabase.from("status")
+            .update({ status: "Cancelled" })
+            .eq("member_id", mapped.membershipId)
+            .select();
+          if (statusErr) throw statusErr;
+          if (updated && updated.length > 0) {
+            setMemberStatuses(prev => prev.map(s => s.memberId === mapped.membershipId ? { ...s, status: "Cancelled" } : s));
+          }
+        } catch (err) { console.error("cancelMember: status table write failed —", err?.message || err); }
+      }
+    } catch (err) {
+      console.error("cancelMember: users.update failed —", err?.message || err);
+      const offlineMember = { ...pendingMember, status: "cancelled", approvalStatus: "cancelled" };
+      setMembers(members.map(m => m.id === memberId ? offlineMember : m));
+      showToast(`Cancelled locally only — database update failed (${err?.message || "unknown error"}). Check console.`, "error");
     }
   };
 
@@ -2758,7 +2794,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         const updateData = {
           child_member_name: libForm.name, email_id: libForm.email,
           phone_number: libForm.phone || null, branch_id: libForm.branch || null,
-          activation_status: libForm.status,
+          approval_status: libForm.status,
         };
         if (libForm.password.trim()) updateData.password = libForm.password.trim();
         const { data, error } = await supabase.from("users").update(updateData).eq("id", editLib.id).select().single();
@@ -2775,7 +2811,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         const insertData = {
           child_member_name: libForm.name, email_id: libForm.email,
           phone_number: libForm.phone || null, branch_id: libForm.branch || null,
-          activation_status: libForm.status, password: autoPassword, role: "librarian",
+          approval_status: libForm.status, password: autoPassword, role: "librarian",
         };
         const { data, error } = await supabase.from("users").insert(insertData).select().single();
         if (error) throw error;
@@ -3179,8 +3215,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
                     onMouseEnter={e => e.currentTarget.style.background = C.green + "0a"}
                     onMouseLeave={e => e.currentTarget.style.background = m.status === "pending" ? C.goldLight + "55" : i % 2 === 0 ? C.white : C.gray50}>
                     <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-                      <div style={{ width: 36, height: 36, background: m.status === "active" ? C.green + "20" : C.orange + "20", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                        <Icon name="user" size={16} color={m.status === "active" ? C.green : C.orange} />
+                      <div style={{ width: 36, height: 36, background: m.status === "approved" ? C.green + "20" : C.orange + "20", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                        <Icon name="user" size={16} color={m.status === "approved" ? C.green : C.orange} />
                       </div>
                       <div style={{ minWidth: 0 }}>
                         <div style={{ fontWeight: 700, color: C.green, fontSize: 13, fontFamily: "monospace" }}>{m.membershipId || m.id}</div>
@@ -3201,9 +3237,12 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
                       {m.fees > 0 && <Badge label={`₹${m.fees} due`} color={C.red} />}
                     </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }} onClick={e => e.stopPropagation()}>
-                      {(m.activationStatus || "").trim().toLowerCase() === "pending" && <Badge label="Pending Approval" color={C.orange} />}
-                      {(m.activationStatus || "").trim().toLowerCase() === "pending" && (
+                      {(m.approvalStatus || "").trim().toLowerCase() === "pending" && <Badge label="Pending Approval" color={C.orange} />}
+                      {(m.approvalStatus || "").trim().toLowerCase() === "pending" && (
                         <Btn size="sm" variant="secondary" icon="check" onClick={() => approveMember(m.id, m.plan)}>Approve</Btn>
+                      )}
+                      {(m.approvalStatus || "").trim().toLowerCase() === "pending" && (
+                        <Btn size="sm" variant="danger" icon="x" onClick={() => cancelMember(m.id)}>Cancel</Btn>
                       )}
                       <button onClick={() => openEditMember(m)} style={{ background: C.blueLight, border: "none", cursor: "pointer", padding: "6px 9px", borderRadius: 6 }} title="Edit"><Icon name="edit" size={13} color={C.blue} /></button>
                       {isAdmin && (
@@ -3242,9 +3281,9 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         const activeLoans = mTxns.filter(t => !t.returnDate);
         const history = mTxns.filter(t => t.returnDate);
 const mRequests = (requests || []).filter(r => r.memberId === m.id);
-        // Activation status comes from the `status` table (kept separate from the member's own record)
+        // Membership status comes from the `status` table (kept separate from the member's own record)
         const statusRow = (memberStatuses || []).find(s => s.memberId === (m.membershipId || m.id));
-        const activationStatus = (statusRow?.status || m.status || "").trim();
+        const membershipStatus = (statusRow?.status || m.status || "").trim();
         // Payments sorted by payment date, descending (most recent first).
         const mPayments = (payments || []).filter(p => p.memberId === (m.membershipId || m.id))
           .slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
@@ -3283,7 +3322,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                   ))}
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", fontSize: 13 }}>
                     <span style={{ color: C.gray600, fontWeight: 600 }}>Membership Status</span>
-                    <Badge label={activationStatus || "—"} color={activationStatus.toLowerCase() === "active" ? C.greenMid : activationStatus.toLowerCase() === "pending" ? C.orange : C.red} />
+                    <Badge label={membershipStatus || "—"} color={membershipStatus.toLowerCase() === "active" ? C.greenMid : membershipStatus.toLowerCase() === "pending" ? C.orange : C.red} />
                   </div>
                   {(() => {
                     const membershipFee   = plan?.cost || 0;
@@ -3329,8 +3368,11 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                   {/* Action buttons */}
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 16 }}>
                     <Btn variant="secondary" icon="edit" onClick={() => openEditMember(m)}>Edit Profile</Btn>
-                    {(m.activationStatus || "").trim().toLowerCase() === "pending" && (
+                    {(m.approvalStatus || "").trim().toLowerCase() === "pending" && (
                       <Btn variant="primary" icon="check" onClick={() => approveMember(m.id, m.plan)}>Approve Member</Btn>
+                    )}
+                    {(m.approvalStatus || "").trim().toLowerCase() === "pending" && (
+                      <Btn variant="danger" icon="x" onClick={() => cancelMember(m.id)}>Cancel Request</Btn>
                     )}
                   </div>
                 </div>
@@ -4642,9 +4684,9 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 ...branches.map(b => ({ value: b.id, label: b.name })),
               ]} />
               <Select label="Approval Status" value={memberForm.status} onChange={e => setMemberForm({ ...memberForm, status: e.target.value })} options={[
-                { value: "active",    label: "Active"    },
                 { value: "pending",   label: "Pending"   },
-                { value: "suspended", label: "Suspended" },
+                { value: "approved",  label: "Approved"  },
+                { value: "cancelled", label: "Cancelled" },
               ]} />
               <Input label="Password" type="password" value={memberForm.password} onChange={e => setMemberForm({ ...memberForm, password: e.target.value })} placeholder="Set login password" icon="lock" hint="Leave blank to default to name + child's DOB (MMDD)" />
               <div style={{ marginBottom: 14 }}>
