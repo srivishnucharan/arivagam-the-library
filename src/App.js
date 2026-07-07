@@ -2960,7 +2960,9 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const activeLoans = transactions.filter(t => !t.returnDate);
   const pendingMembers = members.filter(m => m.status === "pending");
   // Membership Status bucket comes from the status table lookup (e.g. "Active", "Paused",
-  // "Closed", "In Library Reading") — anything else falls back to Active Members.
+  // "Closed", "In Library Reading") — the Active filter requires an actual "Active*" status
+  // (matches INCLUDED_RENEWAL_STATUS below); "Pending" and any blank/unrecognized status fall
+  // into Pending instead, so members awaiting librarian approval never show up as Active.
   // Only "Closed - Late" (or any Closed status mentioning "late") stays in the Closed
   // filter; every other Closed variant is grouped under InLibrary instead.
   const membershipStatusBucket = (m) => {
@@ -2971,7 +2973,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     if (/^closed/i.test(status)) return /late/i.test(status) ? "closed" : "inlibrary";
     if (/^default/i.test(status)) return "default";
     if (/^volunteer/i.test(status)) return "volunteer";
-    return "active";
+    if (/^active/i.test(status)) return "active";
+    return "pending";
   };
   const activeMembersCount = members.filter(m => membershipStatusBucket(m) === "active").length;
   // Shown read-only in the Add Member form's Admin section; edits never regenerate an existing ID
@@ -3151,10 +3154,11 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       {tab === "members" && !selectedMember && (() => {
         const q = memberSearch.trim().toLowerCase();
         const sortedMembers = [...members].sort((a, b) => String(a.membershipId || a.id).localeCompare(String(b.membershipId || b.id)));
-        const statusTabCounts = { active: 0, paused: 0, closed: 0, inlibrary: 0, default: 0, volunteer: 0 };
+        const statusTabCounts = { active: 0, pending: 0, paused: 0, closed: 0, inlibrary: 0, default: 0, volunteer: 0 };
         members.forEach(m => { statusTabCounts[membershipStatusBucket(m)]++; });
         const statusTabs = [
           { id: "active",    label: "Active Members", count: statusTabCounts.active },
+          { id: "pending",   label: "Pending",        count: statusTabCounts.pending },
           { id: "paused",    label: "Paused",         count: statusTabCounts.paused },
           { id: "closed",    label: "Closed",         count: statusTabCounts.closed },
           { id: "inlibrary", label: "InLibrary",       count: statusTabCounts.inlibrary },
