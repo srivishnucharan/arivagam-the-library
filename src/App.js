@@ -2909,12 +2909,14 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const pendingMembers = members.filter(m => m.status === "pending");
   // Membership Status bucket comes from the status table lookup (e.g. "Active", "Paused",
   // "Closed", "In Library Reading") — anything else falls back to Active Members.
+  // Only "Closed - Late" (or any Closed status mentioning "late") stays in the Closed
+  // filter; every other Closed variant is grouped under InLibrary instead.
   const membershipStatusBucket = (m) => {
     const statusRow = (memberStatuses || []).find(s => s.memberId === (m.membershipId || m.id));
     const status = (statusRow?.status || "").trim();
     if (/library/i.test(status)) return "inlibrary";
     if (/^paused/i.test(status)) return "paused";
-    if (/^closed/i.test(status)) return "closed";
+    if (/^closed/i.test(status)) return /late/i.test(status) ? "closed" : "inlibrary";
     if (/^default/i.test(status)) return "default";
     if (/^volunteer/i.test(status)) return "volunteer";
     return "active";
