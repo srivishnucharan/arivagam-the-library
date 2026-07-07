@@ -3954,14 +3954,14 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                       <span style={{ fontSize: 13, color: C.gray700 }}>{p.date || "—"}</span>
                       <div>
                         {member ? (
-                          <div style={{ fontWeight: 700, color: C.green, fontSize: 13, cursor: "pointer", textDecoration: "underline" }}
+                          <div style={{ fontWeight: 700, color: C.green, fontSize: 13, fontFamily: "monospace", cursor: "pointer", textDecoration: "underline" }}
                             onClick={() => { setTab("members"); setSelectedMember(member); }} title="View member profile">
-                            {member.name}
+                            {member.membershipId || member.id}
                           </div>
                         ) : (
-                          <div style={{ fontWeight: 700, color: C.green, fontSize: 13 }}>{p.childMemberName || "—"}</div>
+                          <div style={{ fontWeight: 700, color: C.green, fontSize: 13, fontFamily: "monospace" }}>{p.memberId}</div>
                         )}
-                        <div style={{ fontSize: 11, color: C.gray600 }}>{p.memberId}</div>
+                        <div style={{ fontSize: 12, color: C.gray600 }}>{member?.name || p.childMemberName || "—"}</div>
                       </div>
                       <span style={{ fontSize: 13, color: C.gray700 }}>{p.bookPlan || "—"}</span>
                       <span style={{ fontSize: 14, fontWeight: 700, color: C.greenMid }}>₹{p.amountPaid.toLocaleString()}</span>
