@@ -3229,25 +3229,9 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
         // Activation status comes from the `status` table (kept separate from the member's own record)
         const statusRow = (memberStatuses || []).find(s => s.memberId === (m.membershipId || m.id));
         const activationStatus = (statusRow?.status || m.status || "").trim();
-        // Payments sorted by Next Fee Month, descending. Handles both parseable dates and "MMM-YY" labels.
-        const parseMonthKey = (str) => {
-          if (!str) return -Infinity;
-          const direct = new Date(str);
-          if (!isNaN(direct)) return direct.getTime();
-          const match = String(str).trim().match(/^([A-Za-z]{3,})[\s-]?(\d{2,4})$/);
-          if (match) {
-            const months = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
-            const mi = months.indexOf(match[1].slice(0, 3).toLowerCase());
-            if (mi >= 0) {
-              let yr = parseInt(match[2], 10);
-              if (yr < 100) yr += 2000;
-              return new Date(yr, mi, 1).getTime();
-            }
-          }
-          return -Infinity;
-        };
+        // Payments sorted by payment date, descending (most recent first).
         const mPayments = (payments || []).filter(p => p.memberId === (m.membershipId || m.id))
-          .slice().sort((a, b) => parseMonthKey(b.nextFeeMonth) - parseMonthKey(a.nextFeeMonth));
+          .slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
         return (
           <div>
             {/* Back button */}
