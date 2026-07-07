@@ -3953,7 +3953,14 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                     <div key={p.id} className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "0.9fr 1.5fr 1fr 0.9fr 1fr 1fr 1fr", padding: "12px 18px", borderTop: `1px solid ${C.gray100}`, alignItems: "center", background: i % 2 === 0 ? C.white : C.gray50 }}>
                       <span style={{ fontSize: 13, color: C.gray700 }}>{p.date || "—"}</span>
                       <div>
-                        <div style={{ fontWeight: 700, color: C.green, fontSize: 13 }}>{member?.name || p.childMemberName || "—"}</div>
+                        {member ? (
+                          <div style={{ fontWeight: 700, color: C.green, fontSize: 13, cursor: "pointer", textDecoration: "underline" }}
+                            onClick={() => { setTab("members"); setSelectedMember(member); }} title="View member profile">
+                            {member.name}
+                          </div>
+                        ) : (
+                          <div style={{ fontWeight: 700, color: C.green, fontSize: 13 }}>{p.childMemberName || "—"}</div>
+                        )}
                         <div style={{ fontSize: 11, color: C.gray600 }}>{p.memberId}</div>
                       </div>
                       <span style={{ fontSize: 13, color: C.gray700 }}>{p.bookPlan || "—"}</span>
