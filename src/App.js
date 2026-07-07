@@ -2079,7 +2079,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const [paymentMonthFilter, setPaymentMonthFilter] = useState("");
   const [renewalFilter, setRenewalFilter] = useState(null); // null | "overdue" | "pending"
   const [memberFilter, setMemberFilter] = useState(null); // null | "pending"
-  const [memberStatusTab, setMemberStatusTab] = useState("active"); // "active" | "paused" | "closed" | "inlibrary"
+  const [memberStatusTab, setMemberStatusTab] = useState(null); // null (all) | "active" | "paused" | "closed" | "inlibrary" | "default" | "volunteer"
   const [showBookForm, setShowBookForm] = useState(false);
   const [editBook, setEditBook] = useState(null);
   const [expandedBookId, setExpandedBookId] = useState(null);
@@ -3107,7 +3107,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           { id: "default",   label: "Default",        count: statusTabCounts.default },
           { id: "volunteer", label: "Volunteer",       count: statusTabCounts.volunteer },
         ];
-        const tabFilteredMembers = sortedMembers.filter(m => membershipStatusBucket(m) === memberStatusTab);
+        const tabFilteredMembers = memberStatusTab ? sortedMembers.filter(m => membershipStatusBucket(m) === memberStatusTab) : sortedMembers;
         const filteredMembers = tabFilteredMembers.filter(m => (!memberFilter || m.status === memberFilter)
           && (!q || [m.name, m.email, m.phone, m.membershipId, m.id].filter(Boolean).some(v => String(v).toLowerCase().includes(q))));
         const pillStyle = (active) => ({
@@ -3128,7 +3128,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           </div>
           <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
             {statusTabs.map(t => (
-              <button key={t.id} style={pillStyle(memberStatusTab === t.id)} onClick={() => setMemberStatusTab(t.id)}>{t.label} ({t.count})</button>
+              <button key={t.id} style={pillStyle(memberStatusTab === t.id)} onClick={() => setMemberStatusTab(prev => prev === t.id ? null : t.id)}>{t.label} ({t.count})</button>
             ))}
           </div>
           {memberFilter && (
