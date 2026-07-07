@@ -1101,10 +1101,28 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
     return genMembershipId(joinDate, sameMonthCount);
   };
 
-  const handleSubmit = async () => {
+  // Step 1 only validates and moves to Payment — nothing is written to the users table
+  // yet, so a visitor who fills the form but abandons before paying leaves no member
+  // record behind. The member is only created (together with the payment) in submitPayment.
+  const handleSubmit = () => {
     const e = validate();
     if (Object.keys(e).length) { setErrors(e); return; }
     setErrors({});
+    setCreatedMember({
+      name: form.name.trim(),
+      membershipId: computeNextMembershipId(),
+      plan: selectedPlan?.id || null,
+    });
+    setStep("payment");
+  };
+
+  // Creates the member and records their registration/deposit/subscription payment
+  // together — mirrors submitMemberPayment in the Librarian Add Member form. The users,
+  // payments and status rows are only written once payment is actually submitted here.
+  const submitPayment = async ({ plan, registrationFee, depositFee, subscriptionFee }) => {
+    if (!paymentTxnId.trim()) { setPaymentTxnError("Enter the transaction / reference number."); return; }
+    setPaymentTxnError("");
+    setPaymentSubmitting(true);
     const newMembershipId = computeNextMembershipId();
     const finalPassword = form.password.trim() || deriveDefaultPassword(form.name, form.childMemberDOB) || DEFAULT_MEMBER_PASSWORD;
     const insertData = {
@@ -1133,16 +1151,14 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
       comments: form.comments || null,
       membership_plan: selectedPlan?.name || null,
     };
+    let member;
     try {
       const { data, error } = await supabase.from("users").insert(insertData).select().single();
       if (error) throw error;
-      const mapped = dbToUser(data);
-      onRegisterSuccess(mapped);
-      setCreatedMember(mapped);
-      setStep("payment");
+      member = dbToUser(data);
     } catch (err) {
       console.error("RegisterPage: users.insert failed —", err?.message || err);
-      const offlineMember = {
+      member = {
         id: "PENDING_" + Date.now(), membershipId: newMembershipId,
         name: form.name.trim(), email: form.email.trim().toLowerCase(),
         phone: form.phone.trim(), password: finalPassword,
@@ -1150,18 +1166,8 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
         membershipType: selectedPlan?.inhouseOnly ? "inhouse" : form.membershipType,
         status: "pending", joined: today(), fees: 0,
       };
-      onRegisterSuccess(offlineMember);
-      setCreatedMember(offlineMember);
-      setStep("payment");
     }
-  };
-
-  // Collects the registration/deposit/subscription payment for the just-created member —
-  // mirrors submitMemberPayment in the Librarian Add Member form.
-  const submitPayment = async ({ member, plan, registrationFee, depositFee, subscriptionFee }) => {
-    if (!paymentTxnId.trim()) { setPaymentTxnError("Enter the transaction / reference number."); return; }
-    setPaymentTxnError("");
-    setPaymentSubmitting(true);
+    setCreatedMember(member);
     const now = new Date();
     const thisMonthLabel = now.toLocaleString("en-IN", { month: "short" }) + "-" + String(now.getFullYear()).slice(2);
     const next = new Date(now.getFullYear(), now.getMonth() + 1, 1);
@@ -1185,6 +1191,7 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
     try {
       await supabase.from("users").update({ payment_reference_no: paymentTxnId.trim(), payment_method: paymentChoice }).eq("id", member.id);
     } catch (err) { console.error("RegisterPage: users.update (payment_reference_no) failed —", err?.message || err); }
+    onRegisterSuccess(member);
     setPaymentSubmitting(false);
     setStep("success");
   };
@@ -1406,7 +1413,7 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
 
               <Input label="Transaction ID / Reference No." value={paymentTxnId} onChange={e => setPaymentTxnId(e.target.value)} placeholder="Enter after payment is complete" required error={paymentTxnError} />
 
-              <Btn onClick={() => submitPayment({ member: createdMember, plan, registrationFee, depositFee, subscriptionFee })} variant="primary" size="lg" icon="check" disabled={!paymentTxnId.trim() || paymentSubmitting} style={{ width: "100%", justifyContent: "center" }}>
+              <Btn onClick={() => submitPayment({ plan, registrationFee, depositFee, subscriptionFee })} variant="primary" size="lg" icon="check" disabled={!paymentTxnId.trim() || paymentSubmitting} style={{ width: "100%", justifyContent: "center" }}>
                 {paymentSubmitting ? "Submitting…" : "Submit"}
               </Btn>
             </div>
@@ -2432,13 +2439,10 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     if (!memberForm.guardianName.trim()) { showToast("Parent / Guardian Name is required.", "error"); return; }
     if (!memberForm.relationshipToMember.trim()) { showToast("Relationship to Member is required.", "error"); return; }
     if (!memberForm.plan) { showToast("Membership Plan is required.", "error"); return; }
-    const autoPassword = memberForm.password.trim()
-      || deriveDefaultPassword(memberForm.name, memberForm.childMemberDOB)
-      || memberForm.name.split(" ")[0].toLowerCase() + Math.floor(1000 + Math.random() * 9000);
-    // membership_plan is stored as the plan's display name (e.g. "Standard Reader"), not its id.
-    const resolvedPlan = (settings.plans || DEFAULT_PLANS).find(p => p.id === memberForm.plan);
-    const membershipPlanName = resolvedPlan?.name || memberForm.plan;
     if (editMember) {
+      // membership_plan is stored as the plan's display name (e.g. "Standard Reader"), not its id.
+      const resolvedPlan = (settings.plans || DEFAULT_PLANS).find(p => p.id === memberForm.plan);
+      const membershipPlanName = resolvedPlan?.name || memberForm.plan;
       try {
         const updateData = {
           child_member_name: memberForm.name || memberForm.childMemberName || null,
@@ -2473,52 +2477,64 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       closeMemberForm();
       return;
     }
-    // New member — assign the ID now and move to the Payment step instead of closing
-    const newMembershipId = computeNextMembershipId(memberForm.enrollmentDate);
-    try {
-      const insertData = {
-        child_member_name: memberForm.name || memberForm.childMemberName || null,
-        email_id: memberForm.email, phone_number: memberForm.phone,
-        alternate_phone_number: memberForm.altPhone || null,
-        enrollment_date: memberForm.enrollmentDate || null,
-        child_member_dateofbirth: memberForm.childMemberDOB || null,
-        parent_guardian_name: memberForm.guardianName || null,
-        relationship_to_the_member: memberForm.relationshipToMember || null,
-        address: memberForm.address || null,
-        upi_id: memberForm.upiId || null,
-        payment_method: memberForm.paymentMethod || null,
-        onetime_registration_fees: memberForm.registrationFees !== "" ? parseFloat(memberForm.registrationFees) : null,
-        offer_type: memberForm.offerType || null,
-        refundable_deposit: memberForm.refundableDeposit !== "" ? parseFloat(memberForm.refundableDeposit) : null,
-        branch_id: memberForm.branch || null,
-        password: autoPassword, role: "member", activation_status: memberForm.status,
-        membership_id: newMembershipId,
-        membership_type: memberForm.membershipType, fees_due: 0,
-        membership_plan_description: memberForm.planDescription || null,
-        comments: memberForm.comments || null,
-      };
-      if (memberForm.plan) insertData.membership_plan = membershipPlanName;
-      const { data, error } = await supabase.from("users").insert(insertData).select().single();
-      if (error) throw error;
-      const mapped = dbToUser(data);
-      setMembers([...members, mapped]);
-      setCreatedMember(mapped);
-      setMemberFormStep("payment");
-      showToast(`Member "${memberForm.name}" created. Password: ${autoPassword}`);
-    } catch (err) {
-      console.error("saveMember: users.insert failed —", err?.message || err);
-      const id = "MEM" + String(Date.now()).slice(-6);
-      const offlineMember = { ...memberForm, password: autoPassword, id, membershipId: newMembershipId, joined: memberForm.enrollmentDate || today(), fees: 0 };
-      setMembers([...members, offlineMember]);
-      setCreatedMember(offlineMember);
-      setMemberFormStep("payment");
-      showToast(`Member "${memberForm.name}" created (offline). Password: ${autoPassword}`);
-    }
+    // New member — just move to the Payment step. Nothing is written to the users table
+    // yet, so clicking Create Member and then exiting before paying leaves no orphaned
+    // member behind; the record is only created (together with the payment) in submitMemberPayment.
+    setCreatedMember({
+      name: memberForm.name.trim(),
+      membershipId: computeNextMembershipId(memberForm.enrollmentDate),
+      plan: memberForm.plan,
+    });
+    setMemberFormStep("payment");
   };
-  // Collects the registration/deposit/subscription payment for a just-created member and records it
-  const submitMemberPayment = async ({ member, plan, registrationFee, depositFee, subscriptionFee }) => {
+  // Creates the member and records their registration/deposit/subscription payment together —
+  // mirrors submitPayment in the public RegisterPage.
+  const submitMemberPayment = async ({ plan, registrationFee, depositFee, subscriptionFee }) => {
     if (!paymentTxnId.trim()) { showToast("Enter the transaction / reference number.", "error"); return; }
     setPaymentSubmitting(true);
+    const autoPassword = memberForm.password.trim()
+      || deriveDefaultPassword(memberForm.name, memberForm.childMemberDOB)
+      || memberForm.name.split(" ")[0].toLowerCase() + Math.floor(1000 + Math.random() * 9000);
+    const newMembershipId = computeNextMembershipId(memberForm.enrollmentDate);
+    const resolvedPlan = (settings.plans || DEFAULT_PLANS).find(p => p.id === memberForm.plan);
+    const membershipPlanName = resolvedPlan?.name || memberForm.plan;
+    const insertData = {
+      child_member_name: memberForm.name || memberForm.childMemberName || null,
+      email_id: memberForm.email, phone_number: memberForm.phone,
+      alternate_phone_number: memberForm.altPhone || null,
+      enrollment_date: memberForm.enrollmentDate || null,
+      child_member_dateofbirth: memberForm.childMemberDOB || null,
+      parent_guardian_name: memberForm.guardianName || null,
+      relationship_to_the_member: memberForm.relationshipToMember || null,
+      address: memberForm.address || null,
+      upi_id: memberForm.upiId || null,
+      payment_method: memberForm.paymentMethod || null,
+      onetime_registration_fees: memberForm.registrationFees !== "" ? parseFloat(memberForm.registrationFees) : null,
+      offer_type: memberForm.offerType || null,
+      refundable_deposit: memberForm.refundableDeposit !== "" ? parseFloat(memberForm.refundableDeposit) : null,
+      branch_id: memberForm.branch || null,
+      password: autoPassword, role: "member", activation_status: memberForm.status,
+      membership_id: newMembershipId,
+      membership_type: memberForm.membershipType, fees_due: 0,
+      membership_plan_description: memberForm.planDescription || null,
+      comments: memberForm.comments || null,
+    };
+    if (memberForm.plan) insertData.membership_plan = membershipPlanName;
+    let member;
+    try {
+      const { data, error } = await supabase.from("users").insert(insertData).select().single();
+      if (error) throw error;
+      member = dbToUser(data);
+      setMembers(prev => [...prev, member]);
+      showToast(`Member "${memberForm.name}" created. Password: ${autoPassword}`);
+    } catch (err) {
+      console.error("submitMemberPayment: users.insert failed —", err?.message || err);
+      const id = "MEM" + String(Date.now()).slice(-6);
+      member = { ...memberForm, password: autoPassword, id, membershipId: newMembershipId, joined: memberForm.enrollmentDate || today(), fees: 0 };
+      setMembers(prev => [...prev, member]);
+      showToast(`Member "${memberForm.name}" created (offline). Password: ${autoPassword}`);
+    }
+    setCreatedMember(member);
     const now = new Date();
     const thisMonthLabel = now.toLocaleString("en-IN", { month: "short" }) + "-" + String(now.getFullYear()).slice(2);
     const next = new Date(now.getFullYear(), now.getMonth() + 1, 1);
@@ -2621,7 +2637,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       const mapped = dbToUser(data);
       setMembers(members.map(m => m.id === memberId ? mapped : m));
       activatedMember = mapped;
-      showToast(`Membership activated! ID: ${mapped.membershipId || memberId}`);
+      showToast(`Member approved! ID: ${mapped.membershipId || memberId}`);
       // Flip the status-table row from Pending to Active now that the librarian has confirmed.
       // .update() matching zero rows succeeds silently, so check the row count and insert a
       // fresh row when none existed yet (e.g. a pending member added before the status row
@@ -2649,7 +2665,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       const offlineMember = { ...pendingMember, status: "active", activationStatus: "active", plan: planId || pendingMember?.plan || null };
       setMembers(members.map(m => m.id === memberId ? offlineMember : m));
       activatedMember = offlineMember;
-      showToast(`Membership activated locally only — database update failed (${err?.message || "unknown error"}). Check console.`, "error");
+      showToast(`Member approved locally only — database update failed (${err?.message || "unknown error"}). Check console.`, "error");
     }
     // Fire welcome email — non-blocking, silent on failure
     if (activatedMember?.email) {
@@ -3185,9 +3201,9 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
                       {m.fees > 0 && <Badge label={`₹${m.fees} due`} color={C.red} />}
                     </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }} onClick={e => e.stopPropagation()}>
-                      {(m.activationStatus || "").trim().toLowerCase() === "pending" && <Badge label="Pending Activation" color={C.orange} />}
+                      {(m.activationStatus || "").trim().toLowerCase() === "pending" && <Badge label="Pending Approval" color={C.orange} />}
                       {(m.activationStatus || "").trim().toLowerCase() === "pending" && (
-                        <Btn size="sm" variant="secondary" icon="check" onClick={() => approveMember(m.id, m.plan)}>Activate</Btn>
+                        <Btn size="sm" variant="secondary" icon="check" onClick={() => approveMember(m.id, m.plan)}>Approve</Btn>
                       )}
                       <button onClick={() => openEditMember(m)} style={{ background: C.blueLight, border: "none", cursor: "pointer", padding: "6px 9px", borderRadius: 6 }} title="Edit"><Icon name="edit" size={13} color={C.blue} /></button>
                       {isAdmin && (
@@ -3266,7 +3282,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                     </div>
                   ))}
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", fontSize: 13 }}>
-                    <span style={{ color: C.gray600, fontWeight: 600 }}>Status</span>
+                    <span style={{ color: C.gray600, fontWeight: 600 }}>Membership Status</span>
                     <Badge label={activationStatus || "—"} color={activationStatus.toLowerCase() === "active" ? C.greenMid : activationStatus.toLowerCase() === "pending" ? C.orange : C.red} />
                   </div>
                   {(() => {
@@ -3314,7 +3330,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 16 }}>
                     <Btn variant="secondary" icon="edit" onClick={() => openEditMember(m)}>Edit Profile</Btn>
                     {(m.activationStatus || "").trim().toLowerCase() === "pending" && (
-                      <Btn variant="primary" icon="check" onClick={() => approveMember(m.id, m.plan)}>Activate Member</Btn>
+                      <Btn variant="primary" icon="check" onClick={() => approveMember(m.id, m.plan)}>Approve Member</Btn>
                     )}
                   </div>
                 </div>
@@ -4625,7 +4641,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 { value: "", label: "— Select branch —" },
                 ...branches.map(b => ({ value: b.id, label: b.name })),
               ]} />
-              <Select label="Status" value={memberForm.status} onChange={e => setMemberForm({ ...memberForm, status: e.target.value })} options={[
+              <Select label="Approval Status" value={memberForm.status} onChange={e => setMemberForm({ ...memberForm, status: e.target.value })} options={[
                 { value: "active",    label: "Active"    },
                 { value: "pending",   label: "Pending"   },
                 { value: "suspended", label: "Suspended" },
@@ -4721,7 +4737,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
               <Input label="Transaction ID / Reference No." value={paymentTxnId} onChange={e => setPaymentTxnId(e.target.value)} placeholder="Enter after payment is complete" required />
 
               <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
-                <Btn onClick={() => submitMemberPayment({ member: createdMember, plan, registrationFee, depositFee, subscriptionFee })} variant="primary" icon="check" disabled={!paymentTxnId.trim() || paymentSubmitting}>
+                <Btn onClick={() => submitMemberPayment({ plan, registrationFee, depositFee, subscriptionFee })} variant="primary" icon="check" disabled={!paymentTxnId.trim() || paymentSubmitting}>
                   {paymentSubmitting ? "Submitting…" : "Submit"}
                 </Btn>
               </div>
