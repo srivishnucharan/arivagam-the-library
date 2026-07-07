@@ -933,6 +933,7 @@ const LoginPage = ({ onLogin, onRegister, initialTab = "member" }) => {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [showForgot, setShowForgot] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   const handleLogin = async () => {
     setError("");
@@ -1014,11 +1015,15 @@ const LoginPage = ({ onLogin, onRegister, initialTab = "member" }) => {
             </div>
             <div style={{ position: "relative" }}>
               <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}><Icon name="lock" size={15} color={C.gray300} /></span>
-              <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••"
+              <input type={showPassword ? "text" : "password"} value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••"
                 onKeyDown={e => e.key === "Enter" && handleLogin()}
-                style={{ width: "100%", padding: "9px 12px 9px 34px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none" }}
+                style={{ width: "100%", padding: "9px 34px 9px 34px", borderRadius: 8, border: `1.5px solid ${C.gray300}`, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none" }}
                 onFocus={e => e.target.style.borderColor = C.green}
                 onBlur={e => e.target.style.borderColor = C.gray300} />
+              <button type="button" onClick={() => setShowPassword(v => !v)} title={showPassword ? "Hide password" : "Show password"}
+                style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", padding: 4, display: "flex" }}>
+                <Icon name="eye" size={15} color={showPassword ? C.green : C.gray300} />
+              </button>
             </div>
           </div>
 
