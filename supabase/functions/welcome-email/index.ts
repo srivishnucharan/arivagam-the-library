@@ -15,7 +15,16 @@ const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY")!;
 const SUPABASE_URL   = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_KEY   = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
 Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
+  }
   try {
     const body = await req.json().catch(() => ({}));
 
@@ -64,7 +73,7 @@ Deno.serve(async (req) => {
     const renewalMonthLabel = renewalDate.toLocaleString("en-IN", { month: "long", year: "numeric" });
 
     if (!email) {
-      return new Response(JSON.stringify({ error: "No email address" }), { status: 400 });
+      return new Response(JSON.stringify({ error: "No email address" }), { status: 400, headers: corsHeaders });
     }
 
     const firstName = memberName.split(" ")[0];
@@ -152,9 +161,9 @@ Deno.serve(async (req) => {
     const data = await res.json();
     return new Response(
       JSON.stringify({ ok: res.ok, email, data }),
-      { headers: { "Content-Type": "application/json" } }
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err: any) {
-    return new Response(JSON.stringify({ error: err?.message || "Unknown error" }), { status: 500 });
+    return new Response(JSON.stringify({ error: err?.message || "Unknown error" }), { status: 500, headers: corsHeaders });
   }
 });
