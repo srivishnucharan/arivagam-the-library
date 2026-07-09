@@ -278,6 +278,26 @@ const calcLateFee = (dueDate, feePerDay) => {
   const diff = Math.floor((new Date() - new Date(dueDate)) / 86400000);
   return diff * feePerDay;
 };
+// First-month subscription proration by join-date window:
+//  - Joined 1st–15th  → full month due now; this month becomes last_paid_month.
+//  - Joined 16th–25th → half month due now; this month becomes last_paid_month.
+//  - Joined 26th–EOM  → this month is complementary (₹0, "Complementary" method) and the
+//                        member can use their plan through month-end without charge; the full
+//                        next month is billed now instead, and next month becomes last_paid_month.
+const firstMonthSubscriptionPlan = (enrollmentDateStr, monthlyCost) => {
+  const d = new Date(enrollmentDateStr || today());
+  const day = d.getDate();
+  const thisMonthLabel = monthYearLabel(d.getFullYear(), d.getMonth());
+  if (day <= 15) {
+    return { chargeNowAmount: monthlyCost, chargeNowMonthLabel: thisMonthLabel, lastPaidMonth: thisMonthLabel, complementaryMonthLabel: null, isHalfMonth: false };
+  }
+  if (day <= 25) {
+    return { chargeNowAmount: monthlyCost / 2, chargeNowMonthLabel: thisMonthLabel, lastPaidMonth: thisMonthLabel, complementaryMonthLabel: null, isHalfMonth: true };
+  }
+  const nextMonthDate = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+  const nextMonthLabel = monthYearLabel(nextMonthDate.getFullYear(), nextMonthDate.getMonth());
+  return { chargeNowAmount: monthlyCost, chargeNowMonthLabel: nextMonthLabel, lastPaidMonth: nextMonthLabel, complementaryMonthLabel: thisMonthLabel, isHalfMonth: false };
+};
 const nextId = (list, prefix) => {
   const nums = list.map(x => parseInt(x.id.replace(prefix, ""))).filter(n => !isNaN(n));
   const next = nums.length ? Math.max(...nums) + 1 : 1;
@@ -1181,13 +1201,16 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
       };
     }
     setCreatedMember(member);
-    const now = new Date();
-    const thisMonthLabel = monthYearLabel(now.getFullYear(), now.getMonth());
     const dateStr = today();
+    // Enrollment always happens "now" for self-registration, so re-derive the first-month
+    // proration from today's date rather than trusting the subscriptionFee param — keeps the
+    // payment rows correct even if payment is submitted a moment after the UI computed it.
+    const firstMonth = firstMonthSubscriptionPlan(dateStr, plan?.cost || 0);
     const paymentRows = [
       { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: registrationFee, payment_method: paymentChoice, fee_paid_month: null, payment_type: "Registration" },
       { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: depositFee, payment_method: paymentChoice, fee_paid_month: null, payment_type: "Deposit" },
-      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: subscriptionFee, payment_method: paymentChoice, fee_paid_month: thisMonthLabel, payment_type: "Subscription" },
+      ...(firstMonth.complementaryMonthLabel ? [{ date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: 0, payment_method: "Complementary", fee_paid_month: firstMonth.complementaryMonthLabel, payment_type: "Subscription" }] : []),
+      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: firstMonth.chargeNowAmount, payment_method: paymentChoice, fee_paid_month: firstMonth.chargeNowMonthLabel, payment_type: "Subscription" },
     ];
     try {
       await supabase.from("payments").insert(paymentRows);
@@ -1196,7 +1219,7 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
       await supabase.from("status").insert({
         member_id: member.membershipId, member_name: member.name,
         status: "Pending", membership_plan: plan?.name || null,
-        last_paid_month: thisMonthLabel, number_of_books_with_member: 0,
+        last_paid_month: firstMonth.lastPaidMonth, number_of_books_with_member: 0,
       });
     } catch (err) { console.error("RegisterPage: status.insert failed —", err?.message || err); }
     try {
@@ -1360,7 +1383,8 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
           const plan = plans.find(p => p.id === createdMember.plan || p.name === createdMember.plan) || selectedPlan;
           const registrationFee = parseFloat(form.registrationFees) || 0;
           const depositFee = parseFloat(form.refundableDeposit) || 0;
-          const subscriptionFee = plan?.cost || 0;
+          const firstMonth = firstMonthSubscriptionPlan(today(), plan?.cost || 0);
+          const subscriptionFee = firstMonth.chargeNowAmount;
           const total = registrationFee + depositFee + subscriptionFee;
           const libraryUpi = settings.library?.upiId || "";
           const libName = settings.library?.name || "Library";
@@ -1386,11 +1410,16 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
                   <span>Refundable Deposit</span><span style={{ fontWeight: 700 }}>₹{depositFee.toLocaleString()}</span>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "6px 0", borderTop: `1px solid ${C.gray100}` }}>
-                  <span>{plan?.name || "Subscription"} — 1st month</span><span style={{ fontWeight: 700 }}>₹{subscriptionFee.toLocaleString()}</span>
+                  <span>{plan?.name || "Subscription"} — {firstMonth.chargeNowMonthLabel}{firstMonth.isHalfMonth ? " (half month)" : ""}</span><span style={{ fontWeight: 700 }}>₹{subscriptionFee.toLocaleString()}</span>
                 </div>
                 <div style={{ borderTop: `2px solid ${C.gray300}`, marginTop: 8, paddingTop: 8, display: "flex", justifyContent: "space-between", fontWeight: 800, fontSize: 17 }}>
                   <span>Total</span><span style={{ color: C.green }}>₹{total.toLocaleString()}</span>
                 </div>
+                {firstMonth.complementaryMonthLabel && (
+                  <div style={{ fontSize: 11, color: C.green, fontWeight: 600, marginTop: 8 }}>
+                    {firstMonth.complementaryMonthLabel} is complementary — read &amp; borrow free until {firstMonth.chargeNowMonthLabel} begins.
+                  </div>
+                )}
               </div>
 
               <div style={{ display: "flex", gap: 16, marginBottom: 16 }}>
@@ -2558,13 +2587,15 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       showToast(`Member "${memberForm.name}" created (offline). Password: ${autoPassword}`);
     }
     setCreatedMember(member);
-    const now = new Date();
-    const thisMonthLabel = monthYearLabel(now.getFullYear(), now.getMonth());
     const dateStr = today();
+    // Re-derive from the librarian-set enrollment date (which may be backdated), not "today" —
+    // keeps the payment rows in sync with whatever the Amount Due screen showed.
+    const firstMonth = firstMonthSubscriptionPlan(memberForm.enrollmentDate || dateStr, plan?.cost || 0);
     const paymentRows = [
       { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: registrationFee, payment_method: paymentChoice, fee_paid_month: null, payment_type: "Registration" },
       { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: depositFee, payment_method: paymentChoice, fee_paid_month: null, payment_type: "Deposit" },
-      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: subscriptionFee, payment_method: paymentChoice, fee_paid_month: thisMonthLabel, payment_type: "Subscription" },
+      ...(firstMonth.complementaryMonthLabel ? [{ date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: 0, payment_method: "Complementary", fee_paid_month: firstMonth.complementaryMonthLabel, payment_type: "Subscription" }] : []),
+      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: firstMonth.chargeNowAmount, payment_method: paymentChoice, fee_paid_month: firstMonth.chargeNowMonthLabel, payment_type: "Subscription" },
     ];
     try {
       const { data, error } = await supabase.from("payments").insert(paymentRows).select();
@@ -2575,7 +2606,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       const { data: statusData, error: statusErr } = await supabase.from("status").insert({
         member_id: member.membershipId, member_name: member.name,
         status: "Pending", membership_plan: plan?.name || null,
-        last_paid_month: thisMonthLabel, number_of_books_with_member: 0,
+        last_paid_month: firstMonth.lastPaidMonth, number_of_books_with_member: 0,
       }).select().single();
       if (statusErr) throw statusErr;
       setMemberStatuses(prev => [...prev, dbToMemberStatus(statusData)]);
@@ -4759,7 +4790,8 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
           const plan = resolvePlan(createdMember.plan);
           const registrationFee = parseFloat(memberForm.registrationFees) || 0;
           const depositFee = parseFloat(memberForm.refundableDeposit) || 0;
-          const subscriptionFee = plan?.cost || 0;
+          const firstMonth = firstMonthSubscriptionPlan(memberForm.enrollmentDate || today(), plan?.cost || 0);
+          const subscriptionFee = firstMonth.chargeNowAmount;
           const total = registrationFee + depositFee + subscriptionFee;
           const libraryUpi = localSettings.library?.upiId || settings.library?.upiId || "";
           const libName = localSettings.library?.name || settings.library?.name || "Library";
@@ -4785,11 +4817,16 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                   <span>Refundable Deposit</span><span style={{ fontWeight: 700 }}>₹{depositFee.toLocaleString()}</span>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "6px 0", borderTop: `1px solid ${C.gray100}` }}>
-                  <span>{plan?.name || "Subscription"} — 1st month</span><span style={{ fontWeight: 700 }}>₹{subscriptionFee.toLocaleString()}</span>
+                  <span>{plan?.name || "Subscription"} — {firstMonth.chargeNowMonthLabel}{firstMonth.isHalfMonth ? " (half month)" : ""}</span><span style={{ fontWeight: 700 }}>₹{subscriptionFee.toLocaleString()}</span>
                 </div>
                 <div style={{ borderTop: `2px solid ${C.gray300}`, marginTop: 8, paddingTop: 8, display: "flex", justifyContent: "space-between", fontWeight: 800, fontSize: 17 }}>
                   <span>Total</span><span style={{ color: C.green }}>₹{total.toLocaleString()}</span>
                 </div>
+                {firstMonth.complementaryMonthLabel && (
+                  <div style={{ fontSize: 11, color: C.green, fontWeight: 600, marginTop: 8 }}>
+                    {firstMonth.complementaryMonthLabel} is complementary — member can read &amp; borrow free until {firstMonth.chargeNowMonthLabel} begins.
+                  </div>
+                )}
               </div>
 
               <div style={{ display: "flex", gap: 16, marginBottom: 16 }}>
