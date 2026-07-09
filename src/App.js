@@ -110,7 +110,7 @@ const dbToPayment = (p) => ({
   amountPaid: parseFloat(p.amount_paid) || 0,
   paymentMethod: p.payment_method || "",
   fromAccount: p.from_account || "",
-  nextFeeMonth: p.next_fee_month || "",
+  feePaidMonth: p.fee_paid_month || "",
   panNo: p.pan_no || "",
   paymentType: p.payment_type || "",
 });
@@ -263,6 +263,10 @@ const SEED_TRANSACTIONS = [];
 // UTILITY HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 const today = () => new Date().toISOString().split("T")[0];
+// Canonical "MMM YYYY" label (e.g. "Jul 2026") used everywhere a month needs to be stored as
+// text — status.last_paid_month and payments.fee_paid_month both rely on this exact format
+// being reliably re-parseable via `new Date(label)`.
+const monthYearLabel = (year, monthIndex) => new Date(year, monthIndex, 1).toLocaleString("en-US", { month: "short", year: "numeric" });
 const addDays = (dateStr, days) => {
   const d = new Date(dateStr);
   d.setDate(d.getDate() + days);
@@ -1178,14 +1182,12 @@ const RegisterPage = ({ onRegisterSuccess, onBack, settings, members, branches }
     }
     setCreatedMember(member);
     const now = new Date();
-    const thisMonthLabel = now.toLocaleString("en-IN", { month: "short" }) + "-" + String(now.getFullYear()).slice(2);
-    const next = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-    const nextMonthLabel = next.toLocaleString("en-IN", { month: "short" }) + "-" + String(next.getFullYear()).slice(2);
+    const thisMonthLabel = monthYearLabel(now.getFullYear(), now.getMonth());
     const dateStr = today();
     const paymentRows = [
-      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: registrationFee, payment_method: paymentChoice, next_fee_month: null, payment_type: "Registration" },
-      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: depositFee, payment_method: paymentChoice, next_fee_month: null, payment_type: "Deposit" },
-      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: subscriptionFee, payment_method: paymentChoice, next_fee_month: nextMonthLabel, payment_type: "Subscription" },
+      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: registrationFee, payment_method: paymentChoice, fee_paid_month: null, payment_type: "Registration" },
+      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: depositFee, payment_method: paymentChoice, fee_paid_month: null, payment_type: "Deposit" },
+      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: subscriptionFee, payment_method: paymentChoice, fee_paid_month: thisMonthLabel, payment_type: "Subscription" },
     ];
     try {
       await supabase.from("payments").insert(paymentRows);
@@ -2120,6 +2122,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const [renewExtras, setRenewExtras] = useState({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
   const [collectMode, setCollectMode] = useState("total"); // "total" | "partial" — how last_paid_month gets set on renew
   const [manualPaidMonth, setManualPaidMonth] = useState(""); // "YYYY-MM", used when collectMode === "partial"
+  const [collectPayMethod, setCollectPayMethod] = useState("upi"); // "cash" | "upi" — method for the Collect & Renew payment rows
+  const [writeOffOutstanding, setWriteOffOutstanding] = useState(false); // waives all arrears + late fee, leaving only the current month payable
   const [penaltyModal, setPenaltyModal] = useState(null); // { txn, member, lateAmt }
   const [penaltyExtras, setPenaltyExtras] = useState({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
   const [penaltyShowQR, setPenaltyShowQR] = useState(false);
@@ -2206,8 +2210,18 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     return Math.ceil(diff / 86400000);
   };
   const monthDiff = (from, to) => (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth());
-  // Matches the "MMM YYYY" text format already used in the status table's last_paid_month column (e.g. "Oct 2023")
-  const monthYearLabel = (year, monthIndex) => new Date(year, monthIndex, 1).toLocaleString("en-US", { month: "short", year: "numeric" });
+  // Walks month-by-month from startDate to endDate inclusive, returning "MMM YYYY" labels for
+  // each — used to expand a renewal payment into one payments row per month it covers.
+  const monthsBetween = (startDate, endDate) => {
+    const months = [];
+    const cur = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+    const end = new Date(endDate.getFullYear(), endDate.getMonth(), 1);
+    while (cur <= end) {
+      months.push(monthYearLabel(cur.getFullYear(), cur.getMonth()));
+      cur.setMonth(cur.getMonth() + 1);
+    }
+    return months;
+  };
   // Only track members whose status-table status is some flavor of Active (Active, Active - Last
   // Month, Active - Late) — Default, Paused, Closed*, In Library Reading, Volunteer, EWS are suppressed.
   const INCLUDED_RENEWAL_STATUS = /^active/i;
@@ -2545,14 +2559,12 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     }
     setCreatedMember(member);
     const now = new Date();
-    const thisMonthLabel = now.toLocaleString("en-IN", { month: "short" }) + "-" + String(now.getFullYear()).slice(2);
-    const next = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-    const nextMonthLabel = next.toLocaleString("en-IN", { month: "short" }) + "-" + String(next.getFullYear()).slice(2);
+    const thisMonthLabel = monthYearLabel(now.getFullYear(), now.getMonth());
     const dateStr = today();
     const paymentRows = [
-      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: registrationFee, payment_method: paymentChoice, next_fee_month: null, payment_type: "Registration" },
-      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: depositFee, payment_method: paymentChoice, next_fee_month: null, payment_type: "Deposit" },
-      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: subscriptionFee, payment_method: paymentChoice, next_fee_month: nextMonthLabel, payment_type: "Subscription" },
+      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: registrationFee, payment_method: paymentChoice, fee_paid_month: null, payment_type: "Registration" },
+      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: depositFee, payment_method: paymentChoice, fee_paid_month: null, payment_type: "Deposit" },
+      { date: dateStr, member_id: member.membershipId, child_member_name: member.name, book_plan: plan?.name || null, amount_paid: subscriptionFee, payment_method: paymentChoice, fee_paid_month: thisMonthLabel, payment_type: "Subscription" },
     ];
     try {
       const { data, error } = await supabase.from("payments").insert(paymentRows).select();
@@ -2718,12 +2730,34 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
 
   const renewMember = async (memberId, extras = {}) => {
     const renewedDate = today();
-    // Outstanding fees are cleared only for items the librarian is collecting now
-    const newFees = extras.lateFeeCollected ? 0 : (extras.currentFees || 0);
+    // Outstanding fees are cleared only for items the librarian is collecting now — a write-off
+    // waives them outright instead, so they're zeroed the same as if collected.
+    const newFees = (extras.writeOff || extras.lateFeeCollected) ? 0 : (extras.currentFees || 0);
     try {
       const { error } = await supabase.from("users").update({ plan_renewed_at: renewedDate, renewal_requested_at: null, fees: newFees }).eq("id", memberId);
       if (error) throw error;
       setMembers(prev => prev.map(m => m.id === memberId ? { ...m, planRenewedAt: renewedDate, renewalRequestedAt: null, fees: newFees } : m));
+      // One payments row per subscription month this renewal covers — keeps a per-month audit
+      // trail instead of a single lump-sum row, so arrears/advance payments are traceable.
+      if (extras.membershipId && extras.paidMonths?.length) {
+        const dateStr = today();
+        // On write-off, every month except the current (last) one is waived — ₹0, recorded
+        // with a "Waived Off" payment method instead of whatever the librarian actually collected.
+        const waivedCount = extras.writeOff ? Math.max(0, extras.paidMonths.length - 1) : 0;
+        const paymentRows = extras.paidMonths.map((monthLabel, idx) => {
+          const waived = idx < waivedCount;
+          return {
+            date: dateStr, member_id: extras.membershipId, child_member_name: extras.memberName || "",
+            book_plan: extras.planName || null, amount_paid: waived ? 0 : (extras.monthlyCost || 0),
+            payment_method: waived ? "Waived Off" : (extras.paymentMethod || null), fee_paid_month: monthLabel, payment_type: "Subscription",
+          };
+        });
+        try {
+          const { data: payData, error: payErr } = await supabase.from("payments").insert(paymentRows).select();
+          if (payErr) throw payErr;
+          setPayments?.(prev => [...prev, ...payData.map(dbToPayment)]);
+        } catch (err) { console.error("renewMember: payments.insert failed —", err?.message || err); }
+      }
       // Advance last_paid_month on the status table so Renewals reflects this payment
       if (extras.membershipId && extras.lastPaidMonthText) {
         const { data: updated, error: statusErr } = await supabase.from("status")
@@ -2750,6 +2784,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     setRenewExtras({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
     setCollectMode("total");
     setManualPaidMonth("");
+    setCollectPayMethod("upi");
+    setWriteOffOutstanding(false);
   };
 
   const resetPenaltyExtras = () => setPenaltyExtras({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
@@ -3479,7 +3515,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                     <div className="revenue-tbl-scroll">
                       <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 10, overflow: "hidden" }}>
                         <div className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr 1fr 1fr 1fr 1fr", padding: "10px 16px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase" }}>
-                          <span>Date</span><span>Plan</span><span>Amount</span><span>Method</span><span>Type</span><span>Next Fee Month</span>
+                          <span>Date</span><span>Plan</span><span>Amount</span><span>Method</span><span>Type</span><span>Fee Paid Month</span>
                         </div>
                         {mPayments.map((p, i) => (
                           <div key={p.id} className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr 1fr 1fr 1fr 1fr", padding: "12px 16px", borderTop: `1px solid ${C.gray100}`, alignItems: "center", background: i % 2 === 0 ? C.white : C.gray50 }}>
@@ -3488,7 +3524,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                             <span style={{ fontSize: 14, fontWeight: 700, color: C.greenMid }}>₹{p.amountPaid.toLocaleString()}</span>
                             <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentMethod || "—"}</span>
                             <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentType || "—"}</span>
-                            <span style={{ fontSize: 13, color: C.gray700 }}>{p.nextFeeMonth || "—"}</span>
+                            <span style={{ fontSize: 13, color: C.gray700 }}>{p.feePaidMonth || "—"}</span>
                           </div>
                         ))}
                       </div>
@@ -3978,7 +4014,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
           const haystack = [
             p.memberId, member?.name, p.childMemberName,
             p.bookPlan, p.paymentMethod, p.paymentType,
-            p.nextFeeMonth, p.fromAccount, p.panNo, p.date,
+            p.feePaidMonth, p.fromAccount, p.panNo, p.date,
             String(p.amountPaid),
           ].filter(Boolean).join(" ").toLowerCase();
           return haystack.includes(q);
@@ -3996,7 +4032,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
             <div className="revenue-tbl-scroll">
               <div style={{ background: C.white, border: `1px solid ${C.gray100}`, borderRadius: 12, overflow: "hidden" }}>
                 <div className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "0.9fr 1.5fr 1fr 0.9fr 1fr 1fr 1fr", padding: "10px 18px", background: C.gray50, fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase" }}>
-                  <span>Date</span><span>Member</span><span>Plan</span><span>Amount</span><span>Method</span><span>Type</span><span>Next Fee Month</span>
+                  <span>Date</span><span>Member</span><span>Plan</span><span>Amount</span><span>Method</span><span>Type</span><span>Fee Paid Month</span>
                 </div>
                 {list.map((p, i) => {
                   const member = members.find(m => m.membershipId === p.memberId);
@@ -4018,7 +4054,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                       <span style={{ fontSize: 14, fontWeight: 700, color: C.greenMid }}>₹{p.amountPaid.toLocaleString()}</span>
                       <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentMethod || "—"}</span>
                       <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentType || "—"}</span>
-                      <span style={{ fontSize: 13, color: C.gray700 }}>{p.nextFeeMonth || "—"}</span>
+                      <span style={{ fontSize: 13, color: C.gray700 }}>{p.feePaidMonth || "—"}</span>
                     </div>
                   );
                 })}
@@ -4855,7 +4891,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
         const plan = modalPlan || resolvePlan(m.plan);
         const ex      = renewExtras;
         const resetExtras = () => setRenewExtras({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
-        const closeModal = () => { setRenewModal(null); resetExtras(); setCollectMode("total"); setManualPaidMonth(""); };
+        const closeModal = () => { setRenewModal(null); resetExtras(); setCollectMode("total"); setManualPaidMonth(""); setCollectPayMethod("upi"); setWriteOffOutstanding(false); };
 
         // Recompute arrears here (rather than trusting the caller) so the modal works whether it's
         // opened from the Renewals tab (which precomputes this) or the Members tab pop-out (which doesn't).
@@ -4877,22 +4913,36 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
         const damagedBookAmt     = settings.fees.bookDamageFee    || 200;
         const cautionDepositAmt  = settings.fees.cautionDeposit   || 1000;
 
+        // Write-off waives the late fee outright, so it's never added to what's being collected now.
         const extraTotal =
-          (ex.lateFee         ? lateFeeAmt                                       : 0) +
+          (ex.lateFee && !writeOffOutstanding ? lateFeeAmt                       : 0) +
           (ex.lostBook        ? lostBookAmt        * (ex.lostBookQty    || 1)    : 0) +
           (ex.damagedBook     ? damagedBookAmt     * (ex.damagedBookQty || 1)    : 0) +
           (ex.cautionDeposit  ? cautionDepositAmt                                : 0);
-        const total = overdueAmount + dueThisMonthAmount + extraTotal;
+        const canWriteOff = overdueAmount > 0 || lateFeeAmt > 0;
 
         const currentMonthLabel = monthYearLabel(renewalCurrentMonthStart.getFullYear(), renewalCurrentMonthStart.getMonth());
         const defaultMonthValue = `${renewalCurrentMonthStart.getFullYear()}-${String(renewalCurrentMonthStart.getMonth() + 1).padStart(2, "0")}`;
+        // Every month from the first unpaid month (dueBase) through whatever's selected gets its
+        // own payments row — "total" mode always targets the current month; "partial"/advance
+        // mode targets whichever month the librarian picked (past = partial arrears, future = advance).
+        const targetDate = collectMode === "partial"
+          ? (() => { const [y, mo] = (manualPaidMonth || defaultMonthValue).split("-").map(Number); return new Date(y, mo - 1, 1); })()
+          : new Date(renewalCurrentMonthStart);
+        const paidMonths = monthsBetween(dueBase, targetDate);
+        // Write-off only collects the current month's subscription — every earlier month in
+        // paidMonths still gets marked paid (so arrears stop accruing) but isn't charged for.
+        const subscriptionTotal = writeOffOutstanding ? dueThisMonthAmount : paidMonths.length * monthlyCost;
+        const total = subscriptionTotal + extraTotal;
+        const dueBaseMonthValue = `${dueBase.getFullYear()}-${String(dueBase.getMonth() + 1).padStart(2, "0")}`;
+
         const confirmRenew = () => {
-          let lastPaidMonthText = currentMonthLabel;
-          if (collectMode === "partial") {
-            const [y, mo] = (manualPaidMonth || defaultMonthValue).split("-").map(Number);
-            lastPaidMonthText = monthYearLabel(y, mo - 1);
-          }
-          renewMember(m.id, { lateFeeCollected: ex.lateFee, currentFees: m.fees || 0, membershipId: m.membershipId, memberName: m.name, lastPaidMonthText });
+          const lastPaidMonthText = paidMonths.length ? paidMonths[paidMonths.length - 1] : currentMonthLabel;
+          renewMember(m.id, {
+            lateFeeCollected: ex.lateFee, currentFees: m.fees || 0, membershipId: m.membershipId, memberName: m.name,
+            lastPaidMonthText, paidMonths, monthlyCost, planName: plan?.name || null, paymentMethod: collectPayMethod,
+            writeOff: writeOffOutstanding,
+          });
         };
 
         // Shared styles for qty stepper buttons
@@ -4916,32 +4966,44 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 <div style={{ fontSize: 12, color: C.gray600, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>Payment Breakdown</div>
 
                 {/* Membership fee — always */}
-                {overdueMonths > 0 && (
+                {collectMode === "total" ? (
+                  <>
+                    {overdueMonths > 0 && (
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "8px 0" }}>
+                        <span style={{ fontWeight: 600, color: writeOffOutstanding ? C.gray400 : C.red, textDecoration: writeOffOutstanding ? "line-through" : "none" }}>Overdue — {overdueMonths} month{overdueMonths > 1 ? "s" : ""}</span>
+                        <span style={{ fontWeight: 700, color: writeOffOutstanding ? C.gray400 : C.red }}>{writeOffOutstanding ? "Waived Off" : `₹${overdueAmount.toLocaleString()}`}</span>
+                      </div>
+                    )}
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "8px 0", borderTop: overdueMonths > 0 ? `1px solid ${C.gray100}` : "none" }}>
+                      <span style={{ fontWeight: 600 }}>{plan?.name} — {overdueMonths > 0 ? "this month" : "1 month renewal"}</span>
+                      <span style={{ fontWeight: 700 }}>₹{dueThisMonthAmount.toLocaleString()}</span>
+                    </div>
+                  </>
+                ) : (
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "8px 0" }}>
-                    <span style={{ fontWeight: 600, color: C.red }}>Overdue — {overdueMonths} month{overdueMonths > 1 ? "s" : ""}</span>
-                    <span style={{ fontWeight: 700, color: C.red }}>₹{overdueAmount.toLocaleString()}</span>
+                    <span style={{ fontWeight: 600 }}>
+                      {plan?.name} — {paidMonths.length} month{paidMonths.length !== 1 ? "s" : ""}
+                      {paidMonths.length > 0 && ` (${paidMonths[0]}${paidMonths.length > 1 ? ` – ${paidMonths[paidMonths.length - 1]}` : ""})`}
+                    </span>
+                    <span style={{ fontWeight: 700 }}>₹{subscriptionTotal.toLocaleString()}</span>
                   </div>
                 )}
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "8px 0", borderTop: overdueMonths > 0 ? `1px solid ${C.gray100}` : "none" }}>
-                  <span style={{ fontWeight: 600 }}>{plan?.name} — {overdueMonths > 0 ? "this month" : "1 month renewal"}</span>
-                  <span style={{ fontWeight: 700 }}>₹{dueThisMonthAmount.toLocaleString()}</span>
-                </div>
 
                 <div style={{ fontSize: 12, color: C.gray600, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, margin: "10px 0 2px" }}>Additional Charges</div>
 
                 {/* Late Fee row */}
                 <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: `1px solid ${C.gray100}` }}>
                   <input type="checkbox" id="re-latefee"
-                    checked={ex.lateFee}
-                    disabled={lateFeeAmt === 0}
+                    checked={ex.lateFee && !writeOffOutstanding}
+                    disabled={lateFeeAmt === 0 || writeOffOutstanding}
                     onChange={() => setRenewExtras(prev => ({ ...prev, lateFee: !prev.lateFee }))}
-                    style={{ width: 16, height: 16, accentColor: C.green, cursor: lateFeeAmt > 0 ? "pointer" : "not-allowed", flexShrink: 0 }} />
-                  <label htmlFor="re-latefee" style={{ flex: 1, fontSize: 13, color: lateFeeAmt > 0 ? (ex.lateFee ? C.gray900 : C.gray600) : C.gray400, cursor: lateFeeAmt > 0 ? "pointer" : "default", fontWeight: ex.lateFee ? 600 : 400 }}>
+                    style={{ width: 16, height: 16, accentColor: C.green, cursor: lateFeeAmt > 0 && !writeOffOutstanding ? "pointer" : "not-allowed", flexShrink: 0 }} />
+                  <label htmlFor="re-latefee" style={{ flex: 1, fontSize: 13, color: lateFeeAmt > 0 ? (ex.lateFee && !writeOffOutstanding ? C.gray900 : C.gray600) : C.gray400, cursor: lateFeeAmt > 0 && !writeOffOutstanding ? "pointer" : "default", fontWeight: ex.lateFee && !writeOffOutstanding ? 600 : 400 }}>
                     Outstanding Late Fee
                     <span style={{ fontSize: 12, color: C.gray500, fontWeight: 400 }}>{lateFeeAmt > 0 ? ` (₹${lateFeeAmt.toLocaleString()})` : " (none)"}</span>
                   </label>
-                  <span style={{ fontSize: 13, fontWeight: 700, color: ex.lateFee ? C.red : C.gray400, minWidth: 60, textAlign: "right" }}>
-                    {ex.lateFee ? `₹${lateFeeAmt.toLocaleString()}` : "—"}
+                  <span style={{ fontSize: 13, fontWeight: 700, color: writeOffOutstanding && lateFeeAmt > 0 ? C.gray400 : (ex.lateFee ? C.red : C.gray400), minWidth: 60, textAlign: "right" }}>
+                    {writeOffOutstanding && lateFeeAmt > 0 ? "Waived Off" : (ex.lateFee ? `₹${lateFeeAmt.toLocaleString()}` : "—")}
                   </span>
                 </div>
 
@@ -5019,22 +5081,50 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                     <input type="radio" name="collectMode" checked={collectMode === "total"} onChange={() => setCollectMode("total")} style={{ accentColor: C.green, cursor: "pointer" }} />
                     Total Due
                   </label>
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer", fontWeight: collectMode === "partial" ? 700 : 400, color: collectMode === "partial" ? C.gray900 : C.gray600 }}>
-                    <input type="radio" name="collectMode" checked={collectMode === "partial"} onChange={() => setCollectMode("partial")} style={{ accentColor: C.green, cursor: "pointer" }} />
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: writeOffOutstanding ? "not-allowed" : "pointer", fontWeight: collectMode === "partial" ? 700 : 400, color: writeOffOutstanding ? C.gray400 : (collectMode === "partial" ? C.gray900 : C.gray600) }}>
+                    <input type="radio" name="collectMode" checked={collectMode === "partial"} disabled={writeOffOutstanding} onChange={() => setCollectMode("partial")} style={{ accentColor: C.green, cursor: writeOffOutstanding ? "not-allowed" : "pointer" }} />
                     Partial / Advance
                   </label>
                 </div>
+                {collectMode === "total" && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: `1px solid ${C.gray100}`, marginBottom: 8 }}>
+                    <input type="checkbox" id="re-writeoff"
+                      checked={writeOffOutstanding}
+                      disabled={!canWriteOff}
+                      onChange={() => setWriteOffOutstanding(prev => !prev)}
+                      style={{ width: 16, height: 16, accentColor: C.red, cursor: canWriteOff ? "pointer" : "not-allowed", flexShrink: 0 }} />
+                    <label htmlFor="re-writeoff" style={{ flex: 1, fontSize: 13, color: canWriteOff ? (writeOffOutstanding ? C.red : C.gray600) : C.gray400, cursor: canWriteOff ? "pointer" : "default", fontWeight: writeOffOutstanding ? 700 : 400 }}>
+                      Write Off Outstanding Amount
+                      <span style={{ fontSize: 12, color: C.gray500, fontWeight: 400 }}> — waives all arrears &amp; late fee; only {currentMonthLabel} is collected</span>
+                    </label>
+                  </div>
+                )}
                 {collectMode === "total" ? (
-                  <div style={{ fontSize: 12, color: C.gray600 }}>Marks the member paid through <strong>{currentMonthLabel}</strong>.</div>
+                  <div style={{ fontSize: 12, color: C.gray600 }}>Marks the member paid through <strong>{currentMonthLabel}</strong>{writeOffOutstanding ? " (prior months waived off)" : ""}.</div>
                 ) : (
                   <div>
                     <div style={{ fontSize: 12, color: C.gray600, marginBottom: 6 }}>
                       Choose the last month this payment covers — a past month if they're only paying part of what's owed, or a future month if they're paying in advance.
                     </div>
-                    <input type="month" value={manualPaidMonth || defaultMonthValue} onChange={e => setManualPaidMonth(e.target.value)}
+                    <input type="month" value={manualPaidMonth || defaultMonthValue} min={dueBaseMonthValue} onChange={e => setManualPaidMonth(e.target.value)}
                       style={{ padding: "8px 10px", borderRadius: 6, border: `1px solid ${C.gray300}`, fontSize: 13, fontFamily: "inherit" }} />
                   </div>
                 )}
+              </div>
+
+              {/* Payment Method — recorded on each new Subscription row in payments */}
+              <div style={{ background: C.gray50, borderRadius: 10, padding: "14px 16px", marginBottom: 18, border: `1px solid ${C.gray100}` }}>
+                <div style={{ fontSize: 12, color: C.gray600, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 }}>Payment Method</div>
+                <div style={{ display: "flex", gap: 18 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer", fontWeight: collectPayMethod === "cash" ? 700 : 400, color: collectPayMethod === "cash" ? C.gray900 : C.gray600 }}>
+                    <input type="radio" name="collectPayMethod" checked={collectPayMethod === "cash"} onChange={() => setCollectPayMethod("cash")} style={{ accentColor: C.green, cursor: "pointer" }} />
+                    Cash
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer", fontWeight: collectPayMethod === "upi" ? 700 : 400, color: collectPayMethod === "upi" ? C.gray900 : C.gray600 }}>
+                    <input type="radio" name="collectPayMethod" checked={collectPayMethod === "upi"} onChange={() => setCollectPayMethod("upi")} style={{ accentColor: C.green, cursor: "pointer" }} />
+                    UPI
+                  </label>
+                </div>
               </div>
 
               <p style={{ fontSize: 13, color: C.gray600, margin: "0 0 18px" }}>
