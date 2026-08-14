@@ -2287,7 +2287,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   // instead of trusting `new Date(label)` to parse either reliably.
   const normalizeMonthKey = (label) => {
     if (!label) return null;
-    const m = String(label).trim().toLowerCase().match(/([a-z]{3,})[\s\-]*'?\s*(\d{2,4})/);
+    const m = String(label).trim().toLowerCase().match(/([a-z]{3,})[\s-]*'?\s*(\d{2,4})/);
     if (!m) return null;
     const year = m[2].length === 4 ? m[2].slice(2) : m[2];
     return `${m[1].slice(0, 3)}${year}`;
@@ -2298,7 +2298,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const MONTH_ABBRS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
   const parseMonthLabelToDate = (label) => {
     if (!label) return null;
-    const m = String(label).trim().toLowerCase().match(/([a-z]{3,})[\s\-]*'?\s*(\d{2,4})/);
+    const m = String(label).trim().toLowerCase().match(/([a-z]{3,})[\s-]*'?\s*(\d{2,4})/);
     if (!m) return null;
     const idx = MONTH_ABBRS.indexOf(m[1].slice(0, 3));
     if (idx === -1) return null;
@@ -2740,7 +2740,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           .then(({ data, error }) => ({ memberId, data, error }))
           .catch(error => ({ memberId, data: null, error }))
       ));
-      results.forEach(({ memberId, data, error }) => {
+      for (const { memberId, data, error } of results) {
         if (error || !data?.length) {
           failed += 1;
           failedRows.push(`${memberId}: ${error?.message || "no matching member"}`);
@@ -2749,7 +2749,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           const mapped = dbToUser(data[0]);
           setMembers(prev => prev.map(m => m.membershipId === memberId ? mapped : m));
         }
-      });
+      }
     }
     setImportResult({ inserted: updated, failed, total: rows.length, errors: failedRows, mode: "update" });
     setImportLoading(false);
