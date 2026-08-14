@@ -2257,14 +2257,17 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const renewalCurrentMonthStart = new Date();
   renewalCurrentMonthStart.setDate(1);
   renewalCurrentMonthStart.setHours(0, 0, 0, 0);
-  const renewalDueMembers = (memberStatuses || [])
-    .filter(s => s.status && INCLUDED_RENEWAL_STATUS.test(s.status.trim()))
-    .map(s => {
-      const member = members.find(m => m.membershipId === s.memberId);
-      // users.status is unreliable for many rows — approval_status is the authoritative field
-      const isActiveMember = ((member?.approvalStatus || member?.status || "").trim().toLowerCase() === "approved");
-      if (!member || !isActiveMember) return null;
-      const paidDate = s.lastPaidMonth ? new Date(s.lastPaidMonth) : null;
+  // Walk every approved member, not just members that already have a status-table row — CSV-imported
+  // members (handleImportCSV) never get a status row, so keying off memberStatuses silently dropped
+  // them from Renewals entirely (they read as "up to date" by omission, however overdue they really
+  // were). A missing row just means nobody's tagged a billing status yet, not that they're inactive;
+  // only an explicit non-Active tag (Paused/Closed/etc.) opts a member out.
+  const renewalDueMembers = (members || [])
+    .filter(member => ((member?.approvalStatus || member?.status || "").trim().toLowerCase() === "approved"))
+    .map(member => {
+      const s = (memberStatuses || []).find(row => row.memberId === member.membershipId);
+      if (s && s.status && !INCLUDED_RENEWAL_STATUS.test(s.status.trim())) return null;
+      const paidDate = s?.lastPaidMonth ? new Date(s.lastPaidMonth) : null;
       const validPaidDate = paidDate && !isNaN(paidDate) ? paidDate : null;
       const subscriptionCurrent = !!(validPaidDate && validPaidDate >= renewalCurrentMonthStart);
       const dueBase = validPaidDate ? new Date(validPaidDate) : new Date(member.joined || today());
@@ -2279,7 +2282,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       // Include the member if they owe anything at all — subscription arrears or leftover penalty
       // fees even when their subscription itself is already paid up for this month.
       if (totalOutstanding <= 0) return null;
-      return { ...member, renewalDue: dueBase.toISOString().split("T")[0], statusLastPaidMonth: s.lastPaidMonth, overdueMonths, overdueAmount, dueThisMonthAmount, penaltyFees, totalOutstanding };
+      return { ...member, renewalDue: dueBase.toISOString().split("T")[0], statusLastPaidMonth: s?.lastPaidMonth || null, overdueMonths, overdueAmount, dueThisMonthAmount, penaltyFees, totalOutstanding };
     })
     .filter(Boolean)
     .sort((a, b) => new Date(a.renewalDue) - new Date(b.renewalDue));
@@ -2656,7 +2659,27 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           failedRows.push(error.message);
         } else {
           inserted += data.length;
-          setMembers(prev => [...prev, ...data.map(dbToUser)]);
+          const mappedUsers = data.map(dbToUser);
+          setMembers(prev => [...prev, ...mappedUsers]);
+          // Give every imported member a status-table row too — without one they're invisible to
+          // Renewals and get bucketed as "Pending" in the Members Active filter (membershipStatusBucket).
+          // last_paid_month defaults to their enrollment month via the same proration rule used at
+          // registration/Add Member — CSV has no payment-history column to say otherwise.
+          const statusRows = mappedUsers
+            .filter(u => u.membershipId)
+            .map(u => ({
+              member_id: u.membershipId, member_name: u.name, status: "Active",
+              membership_plan: u.plan || null,
+              last_paid_month: firstMonthSubscriptionPlan(u.joined, 0).lastPaidMonth,
+              number_of_books_with_member: 0,
+            }));
+          if (statusRows.length) {
+            try {
+              const { data: statusData, error: statusErr } = await supabase.from("status").insert(statusRows).select();
+              if (statusErr) throw statusErr;
+              setMemberStatuses(prev => [...prev, ...statusData.map(dbToMemberStatus)]);
+            } catch (err) { console.error("handleImportCSV: status.insert failed —", err?.message || err); }
+          }
         }
       }
       setImportResult({ inserted, failed, total: records.length, errors: failedRows });
