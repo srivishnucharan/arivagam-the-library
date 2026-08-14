@@ -2009,7 +2009,8 @@ const CSV_DB_FIELDS = [
   { value: "email_id", label: "Email ID" },
   { value: "address", label: "Address" },
   { value: "joined_at", label: "Date of Enrollment" },
-  { value: "membership_type", label: "Membership Plan/Type" },
+  { value: "membership_plan", label: "Membership Plan (e.g. Standard Reader)" },
+  { value: "membership_type", label: "Billing Cycle (Annual/Monthly/Inhouse)" },
   { value: "branch_id", label: "Branch" },
   { value: "payment_method", label: "Payment Method" },
   { value: "upi_id", label: "UPI ID" },
@@ -2029,10 +2030,10 @@ const AUTO_CSV_MAP = {
   "address": "address",
   "date of enrollment": "joined_at", "date of enrolment": "joined_at",
   "enrollment date": "joined_at", "join date": "joined_at", "joined": "joined_at",
-  "membership plan": "membership_type", "plan": "membership_type",
+  "membership plan": "membership_plan", "plan": "membership_plan",
+  "membership": "membership_plan", "member plan": "membership_plan",
   "membership type": "membership_type", "membership plan type": "membership_type",
-  "membership": "membership_type", "member type": "membership_type",
-  "member plan": "membership_type",
+  "member type": "membership_type", "billing cycle": "membership_type",
   "branch": "branch_id", "branch id": "branch_id", "branch name": "branch_id",
   "branch code": "branch_id", "location": "branch_id",
   "payment method": "payment_method", "mode of payment": "payment_method",
@@ -2067,7 +2068,26 @@ const normalizeBranchValue = (value, branches = []) => {
   return nameMatch ? String(nameMatch.id) : null;
 };
 
-export const normalizeImportValue = (dbCol, value, branches = []) => {
+// Resolves a CSV plan cell ("Standard Reader", "standard", "2 books") against the library's
+// configured plans and stores the canonical plan *name* — matches how every other member-creation
+// path (registration, Add Member) writes users.membership_plan, so resolvePlan() finds it later.
+// Falls back to the raw trimmed text when nothing matches, so a slightly-off name still round-trips
+// instead of silently disappearing like an unmatched membership_type used to.
+const normalizeMembershipPlanValue = (value, plans = []) => {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const exactMatch = plans.find(p => String(p.name || "").trim().toLowerCase() === raw.toLowerCase());
+  if (exactMatch) return exactMatch.name;
+  const normalized = raw.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const fuzzyMatch = plans.find(p => {
+    const name = String(p.name || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    return name === normalized || name.includes(normalized) || normalized.includes(name);
+  });
+  return fuzzyMatch ? fuzzyMatch.name : raw;
+};
+
+export const normalizeImportValue = (dbCol, value, branches = [], plans = []) => {
+  if (dbCol === "membership_plan") return normalizeMembershipPlanValue(value, plans);
   if (dbCol === "membership_type") return normalizeMembershipType(value);
   if (dbCol === "branch_id" || dbCol === "branch") return normalizeBranchValue(value, branches);
   if (dbCol === "joined_at") {
@@ -2161,6 +2181,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const [importHeaders, setImportHeaders] = useState([]);
   const [importRows, setImportRows] = useState([]);
   const [importMapping, setImportMapping] = useState({});
+  const [importMode, setImportMode] = useState("add"); // "add" new members | "update" existing (matched by Member ID)
   const [importLoading, setImportLoading] = useState(false);
   const [importResult, setImportResult] = useState(null);
   const [selectedMember, setSelectedMember] = useState(null); // member detail view
@@ -2257,37 +2278,96 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const renewalCurrentMonthStart = new Date();
   renewalCurrentMonthStart.setDate(1);
   renewalCurrentMonthStart.setHours(0, 0, 0, 0);
-  // Walk every approved member, not just members that already have a status-table row — CSV-imported
-  // members (handleImportCSV) never get a status row, so keying off memberStatuses silently dropped
-  // them from Renewals entirely (they read as "up to date" by omission, however overdue they really
-  // were). A missing row just means nobody's tagged a billing status yet, not that they're inactive;
-  // only an explicit non-Active tag (Paused/Closed/etc.) opts a member out.
-  const renewalDueMembers = (members || [])
-    .filter(member => ((member?.approvalStatus || member?.status || "").trim().toLowerCase() === "approved"))
-    .map(member => {
-      const s = (memberStatuses || []).find(row => row.memberId === member.membershipId);
-      if (s && s.status && !INCLUDED_RENEWAL_STATUS.test(s.status.trim())) return null;
-      const paidDate = s?.lastPaidMonth ? new Date(s.lastPaidMonth) : null;
-      const validPaidDate = paidDate && !isNaN(paidDate) ? paidDate : null;
-      const subscriptionCurrent = !!(validPaidDate && validPaidDate >= renewalCurrentMonthStart);
-      const dueBase = validPaidDate ? new Date(validPaidDate) : new Date(member.joined || today());
-      dueBase.setMonth(dueBase.getMonth() + 1);
-      // Months strictly before this one that are still unpaid = arrears; this month's charge is separate.
-      const monthlyCost = resolvePlan(member.plan)?.cost || 0;
-      const overdueMonths = subscriptionCurrent ? 0 : Math.max(0, monthDiff(dueBase, renewalCurrentMonthStart));
+  // status.last_paid_month goes stale the moment a payment is recorded any way other than the
+  // in-app Collect & Renew flow (bulk CSV backfills, direct DB edits) — real payments data showed
+  // members marked paid through "Apr 2026" in status while payments already had them through
+  // "Aug 2026". So renewals are now driven straight off payments.fee_paid_month per member, joined
+  // to status only for the Active/Paused/etc. gate. Two label formats coexist in that column across
+  // the data's history ("Apr 2026" vs "Apr-26") — normalize both to a bare "apr26" key for matching
+  // instead of trusting `new Date(label)` to parse either reliably.
+  const normalizeMonthKey = (label) => {
+    if (!label) return null;
+    const m = String(label).trim().toLowerCase().match(/([a-z]{3,})[\s\-]*'?\s*(\d{2,4})/);
+    if (!m) return null;
+    const year = m[2].length === 4 ? m[2].slice(2) : m[2];
+    return `${m[1].slice(0, 3)}${year}`;
+  };
+  const monthKeyLabel = (date) => date.toLocaleString("en-US", { month: "short", year: "numeric" });
+  // Same "Apr 2026" / "Apr-26" tolerance as normalizeMonthKey, but returns an actual sortable Date
+  // (1st of that month) — used by the Collect & Renew modal to find the real latest-paid month.
+  const MONTH_ABBRS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  const parseMonthLabelToDate = (label) => {
+    if (!label) return null;
+    const m = String(label).trim().toLowerCase().match(/([a-z]{3,})[\s\-]*'?\s*(\d{2,4})/);
+    if (!m) return null;
+    const idx = MONTH_ABBRS.indexOf(m[1].slice(0, 3));
+    if (idx === -1) return null;
+    const year = m[2].length === 2 ? 2000 + parseInt(m[2], 10) : parseInt(m[2], 10);
+    return new Date(year, idx, 1);
+  };
+  const renewalPrevMonthStart = new Date(renewalCurrentMonthStart.getFullYear(), renewalCurrentMonthStart.getMonth() - 1, 1);
+  const renewalCurrentKey = normalizeMonthKey(monthKeyLabel(renewalCurrentMonthStart));
+  const renewalPrevKey = normalizeMonthKey(monthKeyLabel(renewalPrevMonthStart));
+  const paymentsByMember = {};
+  (payments || []).forEach(p => {
+    if (!p.memberId) return;
+    (paymentsByMember[p.memberId] || (paymentsByMember[p.memberId] = [])).push(p);
+  });
+  const renewalDueMembers = (memberStatuses || [])
+    .filter(s => s.status && INCLUDED_RENEWAL_STATUS.test(s.status.trim()))
+    .map(s => {
+      const member = (members || []).find(m => m.membershipId === s.memberId);
+      const subs = (paymentsByMember[s.memberId] || []).filter(p => /subscription/i.test(p.paymentType) && p.feePaidMonth);
+      const paidKeys = new Set(subs.map(p => normalizeMonthKey(p.feePaidMonth)).filter(Boolean));
+      if (paidKeys.has(renewalCurrentKey)) return null; // paid this month already — nothing to remind about
+      const hasPrevMonth = paidKeys.has(renewalPrevKey);
+      // Latest subscription payment on record — used for display and as the amount-owed fallback
+      // when the plan can't be resolved (book_plan text drifted over the years: "2 Books" pre-dates
+      // the current "Standard Reader"-style plan names).
+      const latestSub = subs.slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).pop();
+      const monthlyCost = resolvePlan(member?.plan)?.cost || latestSub?.amountPaid || 0;
+      const dueThisMonthAmount = monthlyCost;
+      let overdueMonths = 0;
+      if (!hasPrevMonth) {
+        // Walk back from last month counting consecutive unpaid months. Capped at the member's own
+        // join month (or 36 months back if that's unknown) — otherwise a member with zero
+        // subscription payments ever recorded (brand new, only Registration/Deposit so far) walks
+        // the full cap and reads as "36 months overdue", which is nonsense for someone who joined
+        // last week.
+        const joinedDate = member?.joined ? new Date(member.joined) : null;
+        const maxMonthsBack = joinedDate && !isNaN(joinedDate)
+          ? Math.max(0, Math.min(36, monthDiff(new Date(joinedDate.getFullYear(), joinedDate.getMonth(), 1), renewalPrevMonthStart) + 1))
+          : 36;
+        const cursor = new Date(renewalPrevMonthStart);
+        for (let i = 0; i < maxMonthsBack && !paidKeys.has(normalizeMonthKey(monthKeyLabel(cursor))); i++) {
+          overdueMonths++;
+          cursor.setMonth(cursor.getMonth() - 1);
+        }
+      }
       const overdueAmount = overdueMonths * monthlyCost;
-      const dueThisMonthAmount = subscriptionCurrent ? 0 : monthlyCost;
-      const penaltyFees = member.fees || 0;
+      const penaltyFees = member?.fees || 0;
       const totalOutstanding = overdueAmount + dueThisMonthAmount + penaltyFees;
-      // Include the member if they owe anything at all — subscription arrears or leftover penalty
-      // fees even when their subscription itself is already paid up for this month.
-      if (totalOutstanding <= 0) return null;
-      return { ...member, renewalDue: dueBase.toISOString().split("T")[0], statusLastPaidMonth: s?.lastPaidMonth || null, overdueMonths, overdueAmount, dueThisMonthAmount, penaltyFees, totalOutstanding };
+      const bucket = hasPrevMonth ? "pending" : "overdue";
+      // renewalDue anchors the sort order and the "Due:" date shown in the row — the 1st of the
+      // earliest unpaid month for Overdue, the 1st of this month for Pending.
+      const dueBase = hasPrevMonth
+        ? new Date(renewalCurrentMonthStart)
+        : new Date(renewalPrevMonthStart.getFullYear(), renewalPrevMonthStart.getMonth() - (overdueMonths - 1), 1);
+      return {
+        ...(member || {}),
+        id: member?.id || s.id, membershipId: s.memberId,
+        name: latestSub?.childMemberName || member?.name || s.memberName || s.memberId,
+        plan: member?.plan || null,
+        planLabel: latestSub?.bookPlan || s.membershipPlan || null,
+        renewalDue: dueBase.toISOString().split("T")[0], bucket,
+        statusLastPaidMonth: latestSub?.feePaidMonth || s.lastPaidMonth || null,
+        overdueMonths, overdueAmount, dueThisMonthAmount, penaltyFees, totalOutstanding,
+      };
     })
     .filter(Boolean)
     .sort((a, b) => new Date(a.renewalDue) - new Date(b.renewalDue));
-  const renewalOverdue  = renewalDueMembers.filter(m => daysDiff(m.renewalDue) < 0);
-  const renewalDueSoon  = renewalDueMembers.filter(m => daysDiff(m.renewalDue) >= 0);
+  const renewalOverdue  = renewalDueMembers.filter(m => m.bucket === "overdue");
+  const renewalDueSoon  = renewalDueMembers.filter(m => m.bucket === "pending");
   const renewalCount = renewalDueMembers.length;
 
   const waitlistActiveCount = (waitlist || []).filter(w => w.status === "waiting" || w.status === "reserved").length;
@@ -2623,9 +2703,62 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     setMemberFormStep("success");
   };
 
+  // Re-import in Update mode: matches existing members by Member ID and patches only the mapped,
+  // non-blank fields onto them (never touches role/approval_status/fees_due/password, and skips
+  // any column left blank in a given row so it can't clobber data the CSV doesn't have an opinion
+  // on). Built for backfilling membership_plan on members whose original import predates that
+  // mapping option — map just "Member ID" + "Membership Plan" for a clean, narrow backfill.
+  const handleUpdateExistingFromCSV = async () => {
+    const idCol = Object.keys(importMapping).find(k => importMapping[k] === "membership_id");
+    if (!idCol) {
+      showToast("Update mode needs the \"Member ID\" column mapped so rows can be matched to existing members.", "error");
+      setImportLoading(false);
+      return;
+    }
+    const rows = importRows.map(row => {
+      const rec = {};
+      Object.entries(importMapping).forEach(([csvCol, dbCol]) => {
+        if (!dbCol || dbCol === "membership_id") return; // never overwrite the match key itself
+        const val = (row[csvCol] || "").trim();
+        if (!val) return; // blank cell = leave existing value alone
+        rec[dbCol] = normalizeImportValue(dbCol, val, branches, planList);
+      });
+      return { memberId: (row[idCol] || "").trim(), rec };
+    }).filter(r => r.memberId && Object.keys(r.rec).length > 0);
+
+    if (!rows.length) {
+      showToast("No rows had both a Member ID and at least one other mapped value.", "error");
+      setImportLoading(false);
+      return;
+    }
+
+    let updated = 0, failed = 0, failedRows = [];
+    for (let i = 0; i < rows.length; i += 10) {
+      const chunk = rows.slice(i, i + 10);
+      const results = await Promise.all(chunk.map(({ memberId, rec }) =>
+        supabase.from("users").update(rec).eq("membership_id", memberId).select()
+          .then(({ data, error }) => ({ memberId, data, error }))
+          .catch(error => ({ memberId, data: null, error }))
+      ));
+      results.forEach(({ memberId, data, error }) => {
+        if (error || !data?.length) {
+          failed += 1;
+          failedRows.push(`${memberId}: ${error?.message || "no matching member"}`);
+        } else {
+          updated += 1;
+          const mapped = dbToUser(data[0]);
+          setMembers(prev => prev.map(m => m.membershipId === memberId ? mapped : m));
+        }
+      });
+    }
+    setImportResult({ inserted: updated, failed, total: rows.length, errors: failedRows, mode: "update" });
+    setImportLoading(false);
+  };
+
   const handleImportCSV = async () => {
     setImportLoading(true);
     setImportResult(null);
+    if (importMode === "update") { await handleUpdateExistingFromCSV(); return; }
     try {
       const records = importRows.map(row => {
         const nameCol = Object.keys(importMapping).find(k => importMapping[k] === "child_member_name");
@@ -2639,7 +2772,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         Object.entries(importMapping).forEach(([csvCol, dbCol]) => {
           if (!dbCol) return;
           const val = (row[csvCol] || "").trim();
-          rec[dbCol] = normalizeImportValue(dbCol, val, branches);
+          rec[dbCol] = normalizeImportValue(dbCol, val, branches, planList);
         });
         return rec;
       }).filter(r => r.child_member_name);
@@ -3275,7 +3408,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
               Members ({q ? `${filteredMembers.length} of ${members.length}` : memberFilter === "pending" ? `${filteredMembers.length} pending` : members.length})
             </h2>
             <div style={{ display: "flex", gap: 8 }}>
-              <Btn variant="outline" onClick={() => { setImportHeaders([]); setImportRows([]); setImportMapping({}); setImportResult(null); setShowImportModal(true); }}>Import CSV</Btn>
+              <Btn variant="outline" onClick={() => { setImportHeaders([]); setImportRows([]); setImportMapping({}); setImportMode("add"); setImportResult(null); setShowImportModal(true); }}>Import CSV</Btn>
               <Btn variant="primary" icon="plus" onClick={() => { setMemberForm(emptyMember); setEditMember(null); setMemberFormStep("form"); setShowMemberForm(true); }}>Add Member</Btn>
             </div>
           </div>
@@ -3897,8 +4030,11 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
       {tab === "renewals" && (() => {
         const libraryUpi = localSettings.library?.upiId || settings.library?.upiId || "";
         const makeUpiLink = (plan, member) => {
-          if (!libraryUpi || !plan) return null;
-          const amount = member.totalOutstanding || plan.cost;
+          if (!libraryUpi) return null;
+          // totalOutstanding is computed independently of plan resolution now, so a member whose
+          // plan can't be resolved (legacy book_plan text like "2 Books") still gets a working link.
+          const amount = member.totalOutstanding || plan?.cost || 0;
+          if (!amount) return null;
           const dueDate = new Date(member.renewalDue || today());
           const monthLabel = dueDate.toLocaleString("en-IN", { month: "short" }) + "-" + String(dueDate.getFullYear()).slice(2);
           const note = encodeURIComponent(`${member.membershipId || member.id}-${monthLabel}`);
@@ -3915,13 +4051,12 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
             : m.penaltyFees > 0
               ? `Penalty fees due: *₹${m.penaltyFees.toLocaleString()}*\n*Total Due: ₹${m.totalOutstanding.toLocaleString()}*`
               : `Amount: *₹${m.dueThisMonthAmount}/month*`;
-          const msg = `Hi ${m.name.split(" ")[0]}, your *${plan?.name || "membership"}* at *${localSettings.library?.name || "the library"}* is due for renewal on *${m.renewalDue}* (${monthLabel}).\n\n${amountLine}\n\n${upiLink ? `Pay now 👇\n${upiLink}\n\n` : ""}Pay using the UPI id shared to avoid Late fees and Notify the Librarian after payment. Thanks!! 🙏`;
+          const msg = `Hi ${m.name.split(" ")[0]}, your *${plan?.name || m.planLabel || "membership"}* at *${localSettings.library?.name || "the library"}* is due for renewal on *${m.renewalDue}* (${monthLabel}).\n\n${amountLine}\n\n${upiLink ? `Pay now 👇\n${upiLink}\n\n` : ""}Pay using the UPI id shared to avoid Late fees and Notify the Librarian after payment. Thanks!! 🙏`;
           return `https://wa.me/${phone.startsWith("91") ? phone : "91" + phone}?text=${encodeURIComponent(msg)}`;
         };
         const renderRow = (m, i) => {
           const plan = resolvePlan(m.plan);
-          const diff = daysDiff(m.renewalDue);
-          const overdue = diff < 0;
+          const overdue = m.bucket === "overdue";
           const waLink = makeWhatsAppLink(m, plan);
           return (
             <div key={m.id} style={{ display: "flex", gap: 14, padding: "14px 18px", borderTop: i > 0 ? `1px solid ${C.gray100}` : "none", alignItems: "center", flexWrap: "wrap", background: overdue ? "#FFF5F5" : i % 2 === 0 ? C.white : C.gray50 }}>
@@ -3938,8 +4073,8 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 </div>
                 <div style={{ fontSize: 12, color: C.gray600 }}>{m.email}{m.phone ? ` · ${m.phone}` : ""}</div>
                 <div style={{ fontSize: 12, marginTop: 3 }}>
-                  <span style={{ fontWeight: 600, color: C.blue }}>{plan?.name || "Unknown Plan"}</span>
-                  <span style={{ color: C.gray600 }}> · ₹{plan?.cost || "—"}/month</span>
+                  <span style={{ fontWeight: 600, color: C.blue }}>{plan?.name || m.planLabel || "Unknown Plan"}</span>
+                  <span style={{ color: C.gray600 }}> · ₹{plan?.cost || m.dueThisMonthAmount || "—"}/month</span>
                 </div>
               </div>
               {/* ── Fee Paid pop-out ── */}
@@ -3958,12 +4093,12 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 </div>
               )}
               <div style={{ textAlign: "right", minWidth: 160 }}>
-                <div style={{ fontSize: 12, color: C.gray600 }}>Due: <strong>{m.renewalDue}</strong></div>
+                <div style={{ fontSize: 12, color: C.gray600 }}>Last paid: <strong>{m.statusLastPaidMonth || "never"}</strong></div>
                 {overdue
-                  ? <div style={{ fontSize: 12, color: C.red, fontWeight: 700 }}>{Math.abs(diff)}d overdue</div>
-                  : diff === 0
-                    ? <div style={{ fontSize: 12, color: "#E67E22", fontWeight: 700 }}>Due Today</div>
-                    : <div style={{ fontSize: 12, color: "#E67E22", fontWeight: 600 }}>In {diff} day{diff !== 1 ? "s" : ""}</div>
+                  ? (m.overdueMonths > 0
+                      ? <div style={{ fontSize: 12, color: C.red, fontWeight: 700 }}>{m.overdueMonths} month{m.overdueMonths !== 1 ? "s" : ""} overdue</div>
+                      : <div style={{ fontSize: 12, color: C.red, fontWeight: 700 }}>Never paid</div>)
+                  : <div style={{ fontSize: 12, color: "#E67E22", fontWeight: 700 }}>Due this month</div>
                 }
                 {m.overdueMonths > 0 && (
                   <div style={{ fontSize: 11, color: C.red, marginTop: 3 }}>
@@ -4955,10 +5090,14 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
 
         // Recompute arrears here (rather than trusting the caller) so the modal works whether it's
         // opened from the Renewals tab (which precomputes this) or the Members tab pop-out (which doesn't).
-        const statusRow = (memberStatuses || []).find(s => s.memberId === m.membershipId);
-        const paidDate = statusRow?.lastPaidMonth ? new Date(statusRow.lastPaidMonth) : null;
-        const validPaidDate = paidDate && !isNaN(paidDate) ? paidDate : null;
-        const dueBase = validPaidDate ? new Date(validPaidDate) : new Date(m.joined || today());
+        // Sourced from payments.fee_paid_month — same as the Renewals list — not status.last_paid_month,
+        // which drifts stale the moment a payment lands any way other than through this modal.
+        const memberSubs = (payments || []).filter(p => p.memberId === m.membershipId && /subscription/i.test(p.paymentType) && p.feePaidMonth);
+        const latestPaidDate = memberSubs.reduce((latest, p) => {
+          const d = parseMonthLabelToDate(p.feePaidMonth);
+          return d && !isNaN(d) && (!latest || d > latest) ? d : latest;
+        }, null);
+        const dueBase = latestPaidDate ? new Date(latestPaidDate) : new Date(m.joined || today());
         dueBase.setMonth(dueBase.getMonth() + 1);
         const renewalDue = dueBase.toISOString().split("T")[0];
         const diff    = daysDiff(renewalDue);
@@ -5392,6 +5531,21 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
           {/* Step 2: column mapping + preview */}
           {importHeaders.length > 0 && !importResult && (
             <div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                {[{ id: "add", label: "Add New Members" }, { id: "update", label: "Update Existing (match by Member ID)" }].map(opt => (
+                  <button key={opt.id} onClick={() => setImportMode(opt.id)}
+                    style={{ flex: 1, padding: "8px 10px", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                      border: `2px solid ${importMode === opt.id ? C.green : C.gray300}`, background: importMode === opt.id ? C.green + "15" : C.white, color: importMode === opt.id ? C.green : C.gray600 }}>
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              {importMode === "update" && (
+                <div style={{ background: C.blueLight, border: `1px solid ${C.blue}`, borderRadius: 8, padding: "10px 14px", fontSize: 12, color: C.gray900, marginBottom: 12 }}>
+                  <strong>Update mode:</strong> map <strong>"Member ID"</strong> plus only the field(s) you want to patch (e.g. just Membership Plan).
+                  Blank cells are left alone; unmapped columns are ignored. Existing members not matched by ID are skipped, nothing is duplicated.
+                </div>
+              )}
               <div style={{ fontSize: 13, color: C.gray600, marginBottom: 12 }}>
                 Found <strong>{importRows.length} rows</strong> with <strong>{importHeaders.length} columns</strong>. Map each column to a database field:
               </div>
@@ -5445,16 +5599,18 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 })}
               </div>
 
-              <div style={{ background: C.goldLight + "88", border: `1px solid ${C.gold}`, borderRadius: 8, padding: "10px 14px", fontSize: 12, color: C.gray900, marginBottom: 16 }}>
-                <strong>Note:</strong> Make sure <strong>"Child/Member Name"</strong> is mapped — rows without a name will be skipped.
-                All imported members will be set to <strong>Active</strong> status.
-              </div>
+              {importMode === "add" && (
+                <div style={{ background: C.goldLight + "88", border: `1px solid ${C.gold}`, borderRadius: 8, padding: "10px 14px", fontSize: 12, color: C.gray900, marginBottom: 16 }}>
+                  <strong>Note:</strong> Make sure <strong>"Child/Member Name"</strong> is mapped — rows without a name will be skipped.
+                  All imported members will be set to <strong>Active</strong> status.
+                </div>
+              )}
 
               <div style={{ display: "flex", gap: 10 }}>
                 <Btn variant="primary" onClick={handleImportCSV} disabled={importLoading}>
-                  {importLoading ? "Importing…" : `Import ${importRows.length} Members`}
+                  {importLoading ? (importMode === "update" ? "Updating…" : "Importing…") : (importMode === "update" ? `Update ${importRows.length} Members` : `Import ${importRows.length} Members`)}
                 </Btn>
-                <Btn variant="ghost" onClick={() => { setImportHeaders([]); setImportRows([]); setImportMapping({}); }}>
+                <Btn variant="ghost" onClick={() => { setImportHeaders([]); setImportRows([]); setImportMapping({}); setImportMode("add"); }}>
                   Upload Different File
                 </Btn>
               </div>
@@ -5466,10 +5622,10 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
             <div style={{ textAlign: "center", padding: "24px 0" }}>
               <div style={{ fontSize: 48, marginBottom: 12 }}>{importResult.failed === 0 ? "✅" : "⚠️"}</div>
               <div style={{ fontWeight: 800, fontSize: 18, color: C.green, marginBottom: 8 }}>
-                Import Complete
+                {importResult.mode === "update" ? "Update Complete" : "Import Complete"}
               </div>
               <div style={{ fontSize: 14, color: C.gray600, marginBottom: 4 }}>
-                <strong style={{ color: C.green }}>{importResult.inserted}</strong> members imported successfully
+                <strong style={{ color: C.green }}>{importResult.inserted}</strong> members {importResult.mode === "update" ? "updated" : "imported"} successfully
                 {importResult.failed > 0 && <span>, <strong style={{ color: C.red }}>{importResult.failed}</strong> failed</span>}
               </div>
               {importResult.errors?.length > 0 && (
@@ -5479,7 +5635,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
               )}
               <div style={{ marginTop: 20, display: "flex", gap: 10, justifyContent: "center" }}>
                 <Btn variant="primary" onClick={() => setShowImportModal(false)}>Done</Btn>
-                <Btn variant="ghost" onClick={() => { setImportHeaders([]); setImportRows([]); setImportMapping({}); setImportResult(null); }}>Import Another File</Btn>
+                <Btn variant="ghost" onClick={() => { setImportHeaders([]); setImportRows([]); setImportMapping({}); setImportMode("add"); setImportResult(null); }}>Import Another File</Btn>
               </div>
             </div>
           )}
