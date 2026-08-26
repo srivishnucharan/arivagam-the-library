@@ -41,7 +41,7 @@ const dbToUser = (u) => ({
   // authoritative, so mirror it into .status too (kept for the many existing call sites).
   role: u.role, status: u.approval_status || "", approvalStatus: u.approval_status || "", membershipType: u.membership_type || "annual",
   fees: parseFloat(u.fees_due) || 0,
-  joined: u.joined_at ? u.joined_at.split("T")[0] : new Date().toISOString().split("T")[0],
+  joined: u.joined_at ? u.joined_at.split("T")[0] : localISODate(new Date()),
   enrollmentDate: u.enrollment_date ? u.enrollment_date.split("T")[0] : "",
   password: u.password || "", branch: u.branch_id || "",
   plan: u.membership_plan || null,
@@ -262,7 +262,11 @@ const SEED_TRANSACTIONS = [];
 // ─────────────────────────────────────────────────────────────────────────────
 // UTILITY HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
-const today = () => new Date().toISOString().split("T")[0];
+// Local calendar date as YYYY-MM-DD. Date.toISOString() converts to UTC first, so in any timezone
+// ahead of UTC (IST is +5:30) a locally-constructed midnight — new Date(2026, 7, 1) — rolls back a
+// day and "1 Aug" is rendered "2026-07-31". Use this for any Date built from local y/m/d parts.
+const localISODate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const today = () => localISODate(new Date());
 // Canonical "MMM YYYY" label (e.g. "Jul 2026") used everywhere a month needs to be stored as
 // text — status.last_paid_month and payments.fee_paid_month both rely on this exact format
 // being reliably re-parseable via `new Date(label)`.
@@ -2094,7 +2098,9 @@ export const normalizeImportValue = (dbCol, value, branches = [], plans = []) =>
     const raw = String(value || "").trim();
     if (!raw) return null;
     const d = new Date(raw);
-    return isNaN(d) ? raw : d.toISOString().split("T")[0];
+    // localISODate, not toISOString: a slash/text date ("05/01/2026", "May 1, 2026") parses to
+    // local midnight, which toISOString would roll back a day, landing the member a month early.
+    return isNaN(d) ? raw : localISODate(d);
   }
   const cleaned = String(value || "").trim();
   return cleaned || null;
@@ -2359,7 +2365,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         name: latestSub?.childMemberName || member?.name || s.memberName || s.memberId,
         plan: member?.plan || null,
         planLabel: latestSub?.bookPlan || s.membershipPlan || null,
-        renewalDue: dueBase.toISOString().split("T")[0], bucket,
+        renewalDue: localISODate(dueBase), bucket,
         statusLastPaidMonth: latestSub?.feePaidMonth || s.lastPaidMonth || null,
         overdueMonths, overdueAmount, dueThisMonthAmount, penaltyFees, totalOutstanding,
       };
@@ -2921,7 +2927,10 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     // waives them outright instead, so they're zeroed the same as if collected.
     const newFees = (extras.writeOff || extras.lateFeeCollected) ? 0 : (extras.currentFees || 0);
     try {
-      const { error } = await supabase.from("users").update({ plan_renewed_at: renewedDate, renewal_requested_at: null, fees: newFees }).eq("id", memberId);
+      // Outstanding balance lives in users.fees_due — the app-level field is named `fees`
+      // (see dbToUser), so the column name must be spelled out here or PostgREST rejects
+      // the whole update with PGRST204 and nothing at all gets written.
+      const { error } = await supabase.from("users").update({ plan_renewed_at: renewedDate, renewal_requested_at: null, fees_due: newFees }).eq("id", memberId);
       if (error) throw error;
       setMembers(prev => prev.map(m => m.id === memberId ? { ...m, planRenewedAt: renewedDate, renewalRequestedAt: null, fees: newFees } : m));
       // One payments row per subscription month this renewal covers — keeps a per-month audit
@@ -2945,27 +2954,34 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
           setPayments?.(prev => [...prev, ...payData.map(dbToPayment)]);
         } catch (err) { console.error("renewMember: payments.insert failed —", err?.message || err); }
       }
-      // Advance last_paid_month on the status table so Renewals reflects this payment
+      // Advance last_paid_month on the status table so Renewals reflects this payment.
+      // Scoped to its own try/catch like the payments write above — the renewal itself has
+      // already committed at this point, so a status-table failure must not be reported as
+      // a failed renewal.
       if (extras.membershipId && extras.lastPaidMonthText) {
-        const { data: updated, error: statusErr } = await supabase.from("status")
-          .update({ last_paid_month: extras.lastPaidMonthText })
-          .eq("member_id", extras.membershipId)
-          .select();
-        if (statusErr) throw statusErr;
-        if (updated && updated.length > 0) {
-          setMemberStatuses?.(prev => prev.map(s => s.memberId === extras.membershipId ? { ...s, lastPaidMonth: extras.lastPaidMonthText } : s));
-        } else {
-          // No status row yet (e.g. member added directly in-app) — create one so future renewals track it
-          const { data: inserted, error: insertErr } = await supabase.from("status")
-            .insert({ member_id: extras.membershipId, member_name: extras.memberName || "", status: "Active", last_paid_month: extras.lastPaidMonthText })
+        try {
+          const { data: updated, error: statusErr } = await supabase.from("status")
+            .update({ last_paid_month: extras.lastPaidMonthText })
+            .eq("member_id", extras.membershipId)
             .select();
-          if (!insertErr && inserted?.[0]) setMemberStatuses?.(prev => [...prev, dbToMemberStatus(inserted[0])]);
-        }
+          if (statusErr) throw statusErr;
+          if (updated && updated.length > 0) {
+            setMemberStatuses?.(prev => prev.map(s => s.memberId === extras.membershipId ? { ...s, lastPaidMonth: extras.lastPaidMonthText } : s));
+          } else {
+            // No status row yet (e.g. member added directly in-app) — create one so future renewals track it
+            const { data: inserted, error: insertErr } = await supabase.from("status")
+              .insert({ member_id: extras.membershipId, member_name: extras.memberName || "", status: "Active", last_paid_month: extras.lastPaidMonthText })
+              .select();
+            if (insertErr) throw insertErr;
+            if (inserted?.[0]) setMemberStatuses?.(prev => [...prev, dbToMemberStatus(inserted[0])]);
+          }
+        } catch (err) { console.error("renewMember: status table write failed —", err?.message || err); }
       }
       showToast("Membership renewed successfully!");
-    } catch {
+    } catch (err) {
+      console.error("renewMember: users.update failed —", err?.message || err);
       setMembers(prev => prev.map(m => m.id === memberId ? { ...m, planRenewedAt: renewedDate, renewalRequestedAt: null, fees: newFees } : m));
-      showToast("Renewed (offline — sync when online).");
+      showToast(`Renewed locally only — database update failed (${err?.message || "unknown error"}). Check console.`, "error");
     }
     setRenewModal(null);
     setRenewExtras({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
@@ -2988,9 +3004,12 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       (extras.cautionDeposit  ? cautionAmt                                               : 0);
     if (total === 0) { setPenaltyModal(null); resetPenaltyExtras(); setPenaltyShowQR(false); return; }
     try {
-      const { data: memberRow } = await supabase.from("users").select("fees").eq("id", memberId).single();
-      const prevFees = memberRow?.fees || 0;
-      await supabase.from("users").update({ fees: prevFees + total }).eq("id", memberId);
+      // Same column-name trap as renewMember: the outstanding balance is users.fees_due.
+      const { data: memberRow, error: readErr } = await supabase.from("users").select("fees_due").eq("id", memberId).single();
+      if (readErr) throw readErr;
+      const prevFees = parseFloat(memberRow?.fees_due) || 0;
+      const { error: writeErr } = await supabase.from("users").update({ fees_due: prevFees + total }).eq("id", memberId);
+      if (writeErr) throw writeErr;
       setMembers(prev => prev.map(m => m.id === memberId ? { ...m, fees: (m.fees || 0) + total } : m));
       if (asPayLater) {
         // Pre-check the matching boxes in Collect & Renew so librarian collects at next renewal
@@ -5099,7 +5118,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
         }, null);
         const dueBase = latestPaidDate ? new Date(latestPaidDate) : new Date(m.joined || today());
         dueBase.setMonth(dueBase.getMonth() + 1);
-        const renewalDue = dueBase.toISOString().split("T")[0];
+        const renewalDue = localISODate(dueBase);
         const diff    = daysDiff(renewalDue);
         const overdue = diff < 0;
         const monthlyCost = plan?.cost || 0;
