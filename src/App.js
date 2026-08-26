@@ -244,10 +244,12 @@ const DEFAULT_SETTINGS = {
     email:    "contact@arivagam.com",
     upiId:    "",
     renewalReminderDays: 5,
-    // Arrears are only chased from this month forward. Pre-app payment history is sparse —
-    // counting every missing month since a member joined would surface 15–30 months of
-    // "arrears" for long-tenured members that nobody actually owes. Editable in Fee Settings.
-    arrearsFromMonth: "2026-06",
+    // How many months back Renewals chases unpaid fees, as a rolling window ending last month.
+    // Three, because the refundable deposit is three months' fees: anything unpaid inside that
+    // window is still recoverable from the deposit. Older than that and the deposit is spent, so
+    // the overdue becomes a waive-off conversation rather than a collection — and pre-app history
+    // is too sparse to tell a real gap from a missing record. Editable in Fee Settings.
+    arrearsLookbackMonths: 3,
   },
 };
 
@@ -2307,13 +2309,16 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   };
   const renewalPrevMonthStart = new Date(renewalCurrentMonthStart.getFullYear(), renewalCurrentMonthStart.getMonth() - 1, 1);
   const renewalCurrentKey = normalizeMonthKey(monthKeyLabel(renewalCurrentMonthStart));
-  // Arrears are only chased from this month forward — see DEFAULT_SETTINGS.library.arrearsFromMonth
-  // for why (sparse pre-app history would otherwise read as 15–30 months owed).
+  // Start of the rolling arrears window — see DEFAULT_SETTINGS.library.arrearsLookbackMonths for
+  // why it is three months (the deposit covers exactly that much). Recomputed from the current
+  // month on every render, so the window advances on its own instead of freezing at a fixed date.
+  // The default lives here, not just in DEFAULT_SETTINGS: settings restored from localStorage are
+  // shallow-merged, so a saved `library` object predating this key arrives without it, and reading
+  // that as "no window" would silently switch arrears off altogether.
   const arrearsFromMonthStart = (() => {
-    const raw = settings.library?.arrearsFromMonth;
-    if (!raw) return null;
-    const [y, mo] = String(raw).split("-").map(Number);
-    return y && mo ? new Date(y, mo - 1, 1) : null;
+    const parsed = Number.parseInt(settings.library?.arrearsLookbackMonths, 10);
+    const months = Number.isFinite(parsed) && parsed >= 0 ? parsed : 3;
+    return new Date(renewalCurrentMonthStart.getFullYear(), renewalCurrentMonthStart.getMonth() - months, 1);
   })();
   const paymentsByMember = {};
   (payments || []).forEach(p => {
@@ -4531,11 +4536,11 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 <div style={{ fontSize: 11, color: C.gray600, marginTop: 4 }}>Members see renewal banner &amp; automated email this many days before due</div>
               </div>
               <div>
-                <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5, marginBottom: 6 }}>Track Arrears From</label>
-                <input type="month" value={localSettings.library?.arrearsFromMonth || ""} onChange={e => updateLibrary("arrearsFromMonth", e.target.value)}
+                <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5, marginBottom: 6 }}>Chase Arrears For Last</label>
+                <input type="number" min={0} max={24} value={localSettings.library?.arrearsLookbackMonths ?? 3} onChange={e => updateLibrary("arrearsLookbackMonths", parseInt(e.target.value, 10) || 0)}
                   style={{ width: "100%", padding: "8px 10px", borderRadius: 6, border: `1px solid ${C.gray300}`, fontSize: 13, fontFamily: "inherit", boxSizing: "border-box" }} />
                 <div style={{ fontSize: 11, color: C.gray600, marginTop: 4 }}>
-                  Unpaid months before this are treated as settled. Pre-app payment history is sparse — pulling this back too far shows arrears nobody owes.
+                  Months. Rolling window ending last month — anything older is treated as settled. Defaults to 3 to match the three months of fees held as deposit; beyond that the deposit is spent and the balance is a waive-off decision.
                 </div>
               </div>
             </div>
