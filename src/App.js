@@ -244,6 +244,10 @@ const DEFAULT_SETTINGS = {
     email:    "contact@arivagam.com",
     upiId:    "",
     renewalReminderDays: 5,
+    // Arrears are only chased from this month forward. Pre-app payment history is sparse —
+    // counting every missing month since a member joined would surface 15–30 months of
+    // "arrears" for long-tenured members that nobody actually owes. Editable in Fee Settings.
+    arrearsFromMonth: "2026-06",
   },
 };
 
@@ -2099,7 +2103,8 @@ export const normalizeImportValue = (dbCol, value, branches = [], plans = []) =>
     if (!raw) return null;
     const d = new Date(raw);
     // localISODate, not toISOString: a slash/text date ("05/01/2026", "May 1, 2026") parses to
-    // local midnight, which toISOString would roll back a day, landing the member a month early.
+    // local midnight, which toISOString would roll back a day — landing the member in the previous
+    // month and shifting the arrears window they're measured from.
     return isNaN(d) ? raw : localISODate(d);
   }
   const cleaned = String(value || "").trim();
@@ -2175,10 +2180,12 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const [returnConfirm, setReturnConfirm] = useState(null);
   const [renewModal, setRenewModal] = useState(null); // { member, plan }
   const [renewExtras, setRenewExtras] = useState({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
-  const [collectMode, setCollectMode] = useState("total"); // "total" | "partial" — how last_paid_month gets set on renew
-  const [manualPaidMonth, setManualPaidMonth] = useState(""); // "YYYY-MM", used when collectMode === "partial"
+  // Per-month disposition in Collect & Renew: { "May 2026": "pay" | "waive" | "leave" }. Months
+  // absent from the map default to "pay". "leave" is the one that writes nothing, keeping the month
+  // in arrears even after a later month is settled.
+  const [monthChoices, setMonthChoices] = useState({});
+  const [advanceCount, setAdvanceCount] = useState(0); // how many future months to offer for advance payment
   const [collectPayMethod, setCollectPayMethod] = useState("upi"); // "cash" | "upi" — method for the Collect & Renew payment rows
-  const [writeOffOutstanding, setWriteOffOutstanding] = useState(false); // waives all arrears + late fee, leaving only the current month payable
   const [penaltyModal, setPenaltyModal] = useState(null); // { txn, member, lateAmt }
   const [penaltyExtras, setPenaltyExtras] = useState({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
   const [penaltyShowQR, setPenaltyShowQR] = useState(false);
@@ -2265,19 +2272,6 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     const diff = new Date(dateStr) - new Date(today());
     return Math.ceil(diff / 86400000);
   };
-  const monthDiff = (from, to) => (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth());
-  // Walks month-by-month from startDate to endDate inclusive, returning "MMM YYYY" labels for
-  // each — used to expand a renewal payment into one payments row per month it covers.
-  const monthsBetween = (startDate, endDate) => {
-    const months = [];
-    const cur = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
-    const end = new Date(endDate.getFullYear(), endDate.getMonth(), 1);
-    while (cur <= end) {
-      months.push(monthYearLabel(cur.getFullYear(), cur.getMonth()));
-      cur.setMonth(cur.getMonth() + 1);
-    }
-    return months;
-  };
   // Only track members whose status-table status is some flavor of Active (Active, Active - Last
   // Month, Active - Late) — Default, Paused, Closed*, In Library Reading, Volunteer, EWS are suppressed.
   const INCLUDED_RENEWAL_STATUS = /^active/i;
@@ -2313,7 +2307,14 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   };
   const renewalPrevMonthStart = new Date(renewalCurrentMonthStart.getFullYear(), renewalCurrentMonthStart.getMonth() - 1, 1);
   const renewalCurrentKey = normalizeMonthKey(monthKeyLabel(renewalCurrentMonthStart));
-  const renewalPrevKey = normalizeMonthKey(monthKeyLabel(renewalPrevMonthStart));
+  // Arrears are only chased from this month forward — see DEFAULT_SETTINGS.library.arrearsFromMonth
+  // for why (sparse pre-app history would otherwise read as 15–30 months owed).
+  const arrearsFromMonthStart = (() => {
+    const raw = settings.library?.arrearsFromMonth;
+    if (!raw) return null;
+    const [y, mo] = String(raw).split("-").map(Number);
+    return y && mo ? new Date(y, mo - 1, 1) : null;
+  })();
   const paymentsByMember = {};
   (payments || []).forEach(p => {
     if (!p.memberId) return;
@@ -2325,40 +2326,43 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       const member = (members || []).find(m => m.membershipId === s.memberId);
       const subs = (paymentsByMember[s.memberId] || []).filter(p => /subscription/i.test(p.paymentType) && p.feePaidMonth);
       const paidKeys = new Set(subs.map(p => normalizeMonthKey(p.feePaidMonth)).filter(Boolean));
-      if (paidKeys.has(renewalCurrentKey)) return null; // paid this month already — nothing to remind about
-      const hasPrevMonth = paidKeys.has(renewalPrevKey);
       // Latest subscription payment on record — used for display and as the amount-owed fallback
       // when the plan can't be resolved (book_plan text drifted over the years: "2 Books" pre-dates
       // the current "Standard Reader"-style plan names).
       const latestSub = subs.slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).pop();
       const monthlyCost = resolvePlan(member?.plan)?.cost || latestSub?.amountPaid || 0;
-      const dueThisMonthAmount = monthlyCost;
-      let overdueMonths = 0;
-      if (!hasPrevMonth) {
-        // Walk back from last month counting consecutive unpaid months. Capped at the member's own
-        // join month (or 36 months back if that's unknown) — otherwise a member with zero
-        // subscription payments ever recorded (brand new, only Registration/Deposit so far) walks
-        // the full cap and reads as "36 months overdue", which is nonsense for someone who joined
-        // last week.
-        const joinedDate = member?.joined ? new Date(member.joined) : null;
-        const maxMonthsBack = joinedDate && !isNaN(joinedDate)
-          ? Math.max(0, Math.min(36, monthDiff(new Date(joinedDate.getFullYear(), joinedDate.getMonth(), 1), renewalPrevMonthStart) + 1))
-          : 36;
-        const cursor = new Date(renewalPrevMonthStart);
-        for (let i = 0; i < maxMonthsBack && !paidKeys.has(normalizeMonthKey(monthKeyLabel(cursor))); i++) {
-          overdueMonths++;
-          cursor.setMonth(cursor.getMonth() - 1);
+      // Arrears = every month with no payments row between the cutoff and last month. Counting
+      // *gaps* rather than walking backwards from last month is what lets a member be paid up for
+      // August and still owe May — a backward walk stopped at the first paid month it hit, so any
+      // gap behind that was invisible and the member silently dropped out of Overdue.
+      // Members with no join date get no arrears history: there's no anchor to count from, and
+      // starting at the cutoff alone would fabricate debt for someone who joined last week.
+      const joinedDate = member?.joined ? new Date(member.joined) : null;
+      const joinMonthStart = joinedDate && !isNaN(joinedDate)
+        ? new Date(joinedDate.getFullYear(), joinedDate.getMonth(), 1) : null;
+      const arrearsStart = joinMonthStart && arrearsFromMonthStart
+        ? new Date(Math.max(joinMonthStart.getTime(), arrearsFromMonthStart.getTime()))
+        : null;
+      const missingMonths = [];
+      if (arrearsStart) {
+        const cursor = new Date(arrearsStart);
+        while (cursor <= renewalPrevMonthStart) {
+          if (!paidKeys.has(normalizeMonthKey(monthKeyLabel(cursor)))) missingMonths.push(monthKeyLabel(cursor));
+          cursor.setMonth(cursor.getMonth() + 1);
         }
       }
+      const currentMonthPaid = paidKeys.has(renewalCurrentKey);
+      // Nothing owed at all — no arrears and this month already settled.
+      if (!missingMonths.length && currentMonthPaid) return null;
+      const overdueMonths = missingMonths.length;
       const overdueAmount = overdueMonths * monthlyCost;
+      const dueThisMonthAmount = currentMonthPaid ? 0 : monthlyCost;
       const penaltyFees = member?.fees || 0;
       const totalOutstanding = overdueAmount + dueThisMonthAmount + penaltyFees;
-      const bucket = hasPrevMonth ? "pending" : "overdue";
+      const bucket = overdueMonths > 0 ? "overdue" : "pending";
       // renewalDue anchors the sort order and the "Due:" date shown in the row — the 1st of the
-      // earliest unpaid month for Overdue, the 1st of this month for Pending.
-      const dueBase = hasPrevMonth
-        ? new Date(renewalCurrentMonthStart)
-        : new Date(renewalPrevMonthStart.getFullYear(), renewalPrevMonthStart.getMonth() - (overdueMonths - 1), 1);
+      // earliest month still owed, or of this month when only the current month is outstanding.
+      const dueBase = (missingMonths.length && parseMonthLabelToDate(missingMonths[0])) || new Date(renewalCurrentMonthStart);
       return {
         ...(member || {}),
         id: member?.id || s.id, membershipId: s.memberId,
@@ -2368,6 +2372,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         renewalDue: localISODate(dueBase), bucket,
         statusLastPaidMonth: latestSub?.feePaidMonth || s.lastPaidMonth || null,
         overdueMonths, overdueAmount, dueThisMonthAmount, penaltyFees, totalOutstanding,
+        missingMonths, currentMonthPaid,
       };
     })
     .filter(Boolean)
@@ -2923,9 +2928,9 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
 
   const renewMember = async (memberId, extras = {}) => {
     const renewedDate = today();
-    // Outstanding fees are cleared only for items the librarian is collecting now — a write-off
-    // waives them outright instead, so they're zeroed the same as if collected.
-    const newFees = (extras.writeOff || extras.lateFeeCollected) ? 0 : (extras.currentFees || 0);
+    // Outstanding fees are cleared only for items the librarian is collecting now — a waiver
+    // forgives them outright instead, so they're zeroed the same as if collected.
+    const newFees = (extras.clearFees || extras.lateFeeCollected) ? 0 : (extras.currentFees || 0);
     try {
       // Outstanding balance lives in users.fees_due — the app-level field is named `fees`
       // (see dbToUser), so the column name must be spelled out here or PostgREST rejects
@@ -2935,19 +2940,22 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       setMembers(prev => prev.map(m => m.id === memberId ? { ...m, planRenewedAt: renewedDate, renewalRequestedAt: null, fees: newFees } : m));
       // One payments row per subscription month this renewal covers — keeps a per-month audit
       // trail instead of a single lump-sum row, so arrears/advance payments are traceable.
-      if (extras.membershipId && extras.paidMonths?.length) {
+      // The librarian marks each outstanding month Pay, Waive or Leave. Pay and Waive both write a
+      // row (so the month stops counting as arrears); Leave deliberately writes nothing, which is
+      // what keeps a genuinely unpaid month visible on Renewals after a later month is settled.
+      const settledMonths = [...(extras.payMonths || []), ...(extras.waiveMonths || [])];
+      if (extras.membershipId && settledMonths.length) {
         const dateStr = today();
-        // On write-off, every month except the current (last) one is waived — ₹0, recorded
-        // with a "Waived Off" payment method instead of whatever the librarian actually collected.
-        const waivedCount = extras.writeOff ? Math.max(0, extras.paidMonths.length - 1) : 0;
-        const paymentRows = extras.paidMonths.map((monthLabel, idx) => {
-          const waived = idx < waivedCount;
-          return {
-            date: dateStr, member_id: extras.membershipId, child_member_name: extras.memberName || "",
-            book_plan: extras.planName || null, amount_paid: waived ? 0 : (extras.monthlyCost || 0),
-            payment_method: waived ? "Waived Off" : (extras.paymentMethod || null), fee_paid_month: monthLabel, payment_type: "Subscription",
-          };
+        const rowFor = (monthLabel, waived) => ({
+          date: dateStr, member_id: extras.membershipId, child_member_name: extras.memberName || "",
+          book_plan: extras.planName || null, amount_paid: waived ? 0 : (extras.monthlyCost || 0),
+          payment_method: waived ? "Waived Off" : (extras.paymentMethod || null),
+          fee_paid_month: monthLabel, payment_type: "Subscription",
         });
+        const paymentRows = [
+          ...(extras.payMonths || []).map(l => rowFor(l, false)),
+          ...(extras.waiveMonths || []).map(l => rowFor(l, true)),
+        ];
         try {
           const { data: payData, error: payErr } = await supabase.from("payments").insert(paymentRows).select();
           if (payErr) throw payErr;
@@ -2985,10 +2993,9 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     }
     setRenewModal(null);
     setRenewExtras({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
-    setCollectMode("total");
-    setManualPaidMonth("");
+    setMonthChoices({});
+    setAdvanceCount(0);
     setCollectPayMethod("upi");
-    setWriteOffOutstanding(false);
   };
 
   const resetPenaltyExtras = () => setPenaltyExtras({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
@@ -4065,8 +4072,10 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
           const upiLink = makeUpiLink(plan, m);
           const dueDate = new Date(m.renewalDue || today());
           const monthLabel = dueDate.toLocaleString("en-IN", { month: "short" }) + " " + dueDate.getFullYear();
+          // "This month" is omitted when it's already been paid — a member can now owe arrears
+          // while being settled for the current month.
           const amountLine = m.overdueMonths > 0
-            ? `Overdue: ₹${m.overdueAmount.toLocaleString()} (${m.overdueMonths} month${m.overdueMonths > 1 ? "s" : ""}) + This month: ₹${m.dueThisMonthAmount.toLocaleString()}${m.penaltyFees > 0 ? ` + Penalty: ₹${m.penaltyFees.toLocaleString()}` : ""}\n*Total Due: ₹${m.totalOutstanding.toLocaleString()}*`
+            ? `Overdue: ₹${m.overdueAmount.toLocaleString()} (${m.overdueMonths} month${m.overdueMonths > 1 ? "s" : ""})${m.dueThisMonthAmount > 0 ? ` + This month: ₹${m.dueThisMonthAmount.toLocaleString()}` : ""}${m.penaltyFees > 0 ? ` + Penalty: ₹${m.penaltyFees.toLocaleString()}` : ""}\n*Total Due: ₹${m.totalOutstanding.toLocaleString()}*`
             : m.penaltyFees > 0
               ? `Penalty fees due: *₹${m.penaltyFees.toLocaleString()}*\n*Total Due: ₹${m.totalOutstanding.toLocaleString()}*`
               : `Amount: *₹${m.dueThisMonthAmount}/month*`;
@@ -4121,7 +4130,12 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 }
                 {m.overdueMonths > 0 && (
                   <div style={{ fontSize: 11, color: C.red, marginTop: 3 }}>
-                    ₹{m.overdueAmount.toLocaleString()} overdue + ₹{m.dueThisMonthAmount.toLocaleString()} this month
+                    ₹{m.overdueAmount.toLocaleString()} overdue{m.dueThisMonthAmount > 0 ? ` + ₹${m.dueThisMonthAmount.toLocaleString()} this month` : " · this month paid"}
+                  </div>
+                )}
+                {m.overdueMonths > 0 && m.missingMonths?.length > 0 && (
+                  <div style={{ fontSize: 11, color: C.gray600, marginTop: 2 }}>
+                    {m.missingMonths.join(", ")}
                   </div>
                 )}
                 {m.penaltyFees > 0 && (
@@ -4515,6 +4529,14 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 <input type="number" min={1} max={30} value={localSettings.library?.renewalReminderDays || 5} onChange={e => updateLibrary("renewalReminderDays", parseInt(e.target.value) || 5)}
                   style={{ width: "100%", padding: "8px 10px", borderRadius: 6, border: `1px solid ${C.gray300}`, fontSize: 13, fontFamily: "inherit", boxSizing: "border-box" }} />
                 <div style={{ fontSize: 11, color: C.gray600, marginTop: 4 }}>Members see renewal banner &amp; automated email this many days before due</div>
+              </div>
+              <div>
+                <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: .5, marginBottom: 6 }}>Track Arrears From</label>
+                <input type="month" value={localSettings.library?.arrearsFromMonth || ""} onChange={e => updateLibrary("arrearsFromMonth", e.target.value)}
+                  style={{ width: "100%", padding: "8px 10px", borderRadius: 6, border: `1px solid ${C.gray300}`, fontSize: 13, fontFamily: "inherit", boxSizing: "border-box" }} />
+                <div style={{ fontSize: 11, color: C.gray600, marginTop: 4 }}>
+                  Unpaid months before this are treated as settled. Pre-app payment history is sparse — pulling this back too far shows arrears nobody owes.
+                </div>
               </div>
             </div>
             {localSettings.library?.upiId && (
@@ -5105,61 +5127,87 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
         const plan = modalPlan || resolvePlan(m.plan);
         const ex      = renewExtras;
         const resetExtras = () => setRenewExtras({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
-        const closeModal = () => { setRenewModal(null); resetExtras(); setCollectMode("total"); setManualPaidMonth(""); setCollectPayMethod("upi"); setWriteOffOutstanding(false); };
+        const closeModal = () => { setRenewModal(null); resetExtras(); setMonthChoices({}); setAdvanceCount(0); setCollectPayMethod("upi"); };
 
-        // Recompute arrears here (rather than trusting the caller) so the modal works whether it's
-        // opened from the Renewals tab (which precomputes this) or the Members tab pop-out (which doesn't).
-        // Sourced from payments.fee_paid_month — same as the Renewals list — not status.last_paid_month,
-        // which drifts stale the moment a payment lands any way other than through this modal.
+        // Recompute the outstanding months here (rather than trusting the caller) so the modal works
+        // whether it's opened from the Renewals tab (which precomputes this) or the Members tab
+        // pop-out (which doesn't). Sourced from payments.fee_paid_month — same as the Renewals list —
+        // not status.last_paid_month, which drifts stale the moment a payment lands any other way.
         const memberSubs = (payments || []).filter(p => p.memberId === m.membershipId && /subscription/i.test(p.paymentType) && p.feePaidMonth);
-        const latestPaidDate = memberSubs.reduce((latest, p) => {
-          const d = parseMonthLabelToDate(p.feePaidMonth);
-          return d && !isNaN(d) && (!latest || d > latest) ? d : latest;
-        }, null);
-        const dueBase = latestPaidDate ? new Date(latestPaidDate) : new Date(m.joined || today());
-        dueBase.setMonth(dueBase.getMonth() + 1);
-        const renewalDue = localISODate(dueBase);
-        const diff    = daysDiff(renewalDue);
-        const overdue = diff < 0;
+        const memberPaidKeys = new Set(memberSubs.map(p => normalizeMonthKey(p.feePaidMonth)).filter(Boolean));
         const monthlyCost = plan?.cost || 0;
-        const overdueMonths = Math.max(0, monthDiff(dueBase, renewalCurrentMonthStart));
-        const overdueAmount = overdueMonths * monthlyCost;
-        const dueThisMonthAmount = monthlyCost;
+        const currentMonthLabel = monthYearLabel(renewalCurrentMonthStart.getFullYear(), renewalCurrentMonthStart.getMonth());
+
+        // Same arrears window as the Renewals list: from max(join month, cutoff) to last month,
+        // plus the current month, minus anything already settled.
+        const modalJoined = m.joined ? new Date(m.joined) : null;
+        const modalJoinStart = modalJoined && !isNaN(modalJoined)
+          ? new Date(modalJoined.getFullYear(), modalJoined.getMonth(), 1) : null;
+        const modalArrearsStart = modalJoinStart && arrearsFromMonthStart
+          ? new Date(Math.max(modalJoinStart.getTime(), arrearsFromMonthStart.getTime()))
+          : (arrearsFromMonthStart || new Date(renewalCurrentMonthStart));
+        const outstandingMonths = [];
+        {
+          const cursor = new Date(modalArrearsStart);
+          while (cursor <= renewalCurrentMonthStart) {
+            const label = monthKeyLabel(cursor);
+            if (!memberPaidKeys.has(normalizeMonthKey(label))) outstandingMonths.push(label);
+            cursor.setMonth(cursor.getMonth() + 1);
+          }
+        }
+        // Advance months sit after the current one — some members pay several months ahead.
+        const advanceMonths = [];
+        for (let i = 1; i <= advanceCount; i++) {
+          const d = new Date(renewalCurrentMonthStart.getFullYear(), renewalCurrentMonthStart.getMonth() + i, 1);
+          const label = monthKeyLabel(d);
+          if (!memberPaidKeys.has(normalizeMonthKey(label))) advanceMonths.push(label);
+        }
+        const allMonths = [...outstandingMonths, ...advanceMonths];
+        // Default every month to "pay" so the common case — member settles everything — stays a
+        // single click. "waive" forgives it at ₹0; "leave" writes nothing and keeps it in arrears.
+        const choiceFor = (label) => monthChoices[label] || "pay";
+        const setChoice = (label, choice) => setMonthChoices(prev => ({ ...prev, [label]: choice }));
+        const payMonths   = allMonths.filter(l => choiceFor(l) === "pay");
+        const waiveMonths = allMonths.filter(l => choiceFor(l) === "waive");
+        const leaveMonths = allMonths.filter(l => choiceFor(l) === "leave");
+
+        const arrearsCount = outstandingMonths.filter(l => l !== currentMonthLabel).length;
+        const renewalDue = localISODate(parseMonthLabelToDate(outstandingMonths[0]) || renewalCurrentMonthStart);
+        const diff    = daysDiff(renewalDue);
+        const overdue = arrearsCount > 0;
 
         const lateFeeAmt         = m.fees || 0;
         const lostBookAmt        = settings.fees.bookLostFee      || 500;
         const damagedBookAmt     = settings.fees.bookDamageFee    || 200;
         const cautionDepositAmt  = settings.fees.cautionDeposit   || 1000;
 
-        // Write-off waives the late fee outright, so it's never added to what's being collected now.
+        // Waiving any month forgives the outstanding late fee along with it, so it's never added
+        // to what's being collected now.
+        const waivingAny = waiveMonths.length > 0;
         const extraTotal =
-          (ex.lateFee && !writeOffOutstanding ? lateFeeAmt                       : 0) +
+          (ex.lateFee && !waivingAny ? lateFeeAmt                                : 0) +
           (ex.lostBook        ? lostBookAmt        * (ex.lostBookQty    || 1)    : 0) +
           (ex.damagedBook     ? damagedBookAmt     * (ex.damagedBookQty || 1)    : 0) +
           (ex.cautionDeposit  ? cautionDepositAmt                                : 0);
-        const canWriteOff = overdueAmount > 0 || lateFeeAmt > 0;
 
-        const currentMonthLabel = monthYearLabel(renewalCurrentMonthStart.getFullYear(), renewalCurrentMonthStart.getMonth());
-        const defaultMonthValue = `${renewalCurrentMonthStart.getFullYear()}-${String(renewalCurrentMonthStart.getMonth() + 1).padStart(2, "0")}`;
-        // Every month from the first unpaid month (dueBase) through whatever's selected gets its
-        // own payments row — "total" mode always targets the current month; "partial"/advance
-        // mode targets whichever month the librarian picked (past = partial arrears, future = advance).
-        const targetDate = collectMode === "partial"
-          ? (() => { const [y, mo] = (manualPaidMonth || defaultMonthValue).split("-").map(Number); return new Date(y, mo - 1, 1); })()
-          : new Date(renewalCurrentMonthStart);
-        const paidMonths = monthsBetween(dueBase, targetDate);
-        // Write-off only collects the current month's subscription — every earlier month in
-        // paidMonths still gets marked paid (so arrears stop accruing) but isn't charged for.
-        const subscriptionTotal = writeOffOutstanding ? dueThisMonthAmount : paidMonths.length * monthlyCost;
+        const subscriptionTotal = payMonths.length * monthlyCost;
         const total = subscriptionTotal + extraTotal;
-        const dueBaseMonthValue = `${dueBase.getFullYear()}-${String(dueBase.getMonth() + 1).padStart(2, "0")}`;
+        // Everything marked Leave with no charges ticked would write nothing at all — block the
+        // confirm rather than reporting a successful renewal that touched no records.
+        const nothingToRecord = payMonths.length === 0 && waiveMonths.length === 0 && extraTotal === 0;
 
         const confirmRenew = () => {
-          const lastPaidMonthText = paidMonths.length ? paidMonths[paidMonths.length - 1] : currentMonthLabel;
+          // Latest month actually settled (paid or waived) — display only now that Renewals reads
+          // the payments rows directly. Null when nothing was settled, which skips the status write.
+          const settled = [...payMonths, ...waiveMonths]
+            .map(l => ({ l, d: parseMonthLabelToDate(l) }))
+            .filter(x => x.d && !isNaN(x.d))
+            .sort((a, b) => a.d - b.d);
           renewMember(m.id, {
             lateFeeCollected: ex.lateFee, currentFees: m.fees || 0, membershipId: m.membershipId, memberName: m.name,
-            lastPaidMonthText, paidMonths, monthlyCost, planName: plan?.name || null, paymentMethod: collectPayMethod,
-            writeOff: writeOffOutstanding,
+            lastPaidMonthText: settled.length ? settled[settled.length - 1].l : null,
+            payMonths, waiveMonths, monthlyCost, planName: plan?.name || null, paymentMethod: collectPayMethod,
+            clearFees: waivingAny,
           });
         };
 
@@ -5183,27 +5231,31 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
               <div style={{ background: C.gray50, borderRadius: 10, padding: "14px 16px", marginBottom: 18, border: `1px solid ${C.gray100}` }}>
                 <div style={{ fontSize: 12, color: C.gray600, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>Payment Breakdown</div>
 
-                {/* Membership fee — always */}
-                {collectMode === "total" ? (
-                  <>
-                    {overdueMonths > 0 && (
-                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "8px 0" }}>
-                        <span style={{ fontWeight: 600, color: writeOffOutstanding ? C.gray400 : C.red, textDecoration: writeOffOutstanding ? "line-through" : "none" }}>Overdue — {overdueMonths} month{overdueMonths > 1 ? "s" : ""}</span>
-                        <span style={{ fontWeight: 700, color: writeOffOutstanding ? C.gray400 : C.red }}>{writeOffOutstanding ? "Waived Off" : `₹${overdueAmount.toLocaleString()}`}</span>
-                      </div>
-                    )}
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "8px 0", borderTop: overdueMonths > 0 ? `1px solid ${C.gray100}` : "none" }}>
-                      <span style={{ fontWeight: 600 }}>{plan?.name} — {overdueMonths > 0 ? "this month" : "1 month renewal"}</span>
-                      <span style={{ fontWeight: 700 }}>₹{dueThisMonthAmount.toLocaleString()}</span>
-                    </div>
-                  </>
-                ) : (
+                {/* Membership fee — one line per month being collected */}
+                {payMonths.length > 0 ? (
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "8px 0" }}>
                     <span style={{ fontWeight: 600 }}>
-                      {plan?.name} — {paidMonths.length} month{paidMonths.length !== 1 ? "s" : ""}
-                      {paidMonths.length > 0 && ` (${paidMonths[0]}${paidMonths.length > 1 ? ` – ${paidMonths[paidMonths.length - 1]}` : ""})`}
+                      {plan?.name} — {payMonths.length} month{payMonths.length !== 1 ? "s" : ""} ({payMonths.join(", ")})
                     </span>
                     <span style={{ fontWeight: 700 }}>₹{subscriptionTotal.toLocaleString()}</span>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 13, color: C.gray600, padding: "8px 0" }}>No months marked as paid.</div>
+                )}
+                {waiveMonths.length > 0 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "8px 0", borderTop: `1px solid ${C.gray100}` }}>
+                    <span style={{ fontWeight: 600, color: C.gray400, textDecoration: "line-through" }}>
+                      Waived — {waiveMonths.length} month{waiveMonths.length !== 1 ? "s" : ""} ({waiveMonths.join(", ")})
+                    </span>
+                    <span style={{ fontWeight: 700, color: C.gray400 }}>Waived Off</span>
+                  </div>
+                )}
+                {leaveMonths.length > 0 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "8px 0", borderTop: `1px solid ${C.gray100}` }}>
+                    <span style={{ fontWeight: 600, color: C.red }}>
+                      Still owed — {leaveMonths.length} month{leaveMonths.length !== 1 ? "s" : ""} ({leaveMonths.join(", ")})
+                    </span>
+                    <span style={{ fontWeight: 700, color: C.red }}>₹{(leaveMonths.length * monthlyCost).toLocaleString()}</span>
                   </div>
                 )}
 
@@ -5212,16 +5264,16 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 {/* Late Fee row */}
                 <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: `1px solid ${C.gray100}` }}>
                   <input type="checkbox" id="re-latefee"
-                    checked={ex.lateFee && !writeOffOutstanding}
-                    disabled={lateFeeAmt === 0 || writeOffOutstanding}
+                    checked={ex.lateFee && !waivingAny}
+                    disabled={lateFeeAmt === 0 || waivingAny}
                     onChange={() => setRenewExtras(prev => ({ ...prev, lateFee: !prev.lateFee }))}
-                    style={{ width: 16, height: 16, accentColor: C.green, cursor: lateFeeAmt > 0 && !writeOffOutstanding ? "pointer" : "not-allowed", flexShrink: 0 }} />
-                  <label htmlFor="re-latefee" style={{ flex: 1, fontSize: 13, color: lateFeeAmt > 0 ? (ex.lateFee && !writeOffOutstanding ? C.gray900 : C.gray600) : C.gray400, cursor: lateFeeAmt > 0 && !writeOffOutstanding ? "pointer" : "default", fontWeight: ex.lateFee && !writeOffOutstanding ? 600 : 400 }}>
+                    style={{ width: 16, height: 16, accentColor: C.green, cursor: lateFeeAmt > 0 && !waivingAny ? "pointer" : "not-allowed", flexShrink: 0 }} />
+                  <label htmlFor="re-latefee" style={{ flex: 1, fontSize: 13, color: lateFeeAmt > 0 ? (ex.lateFee && !waivingAny ? C.gray900 : C.gray600) : C.gray400, cursor: lateFeeAmt > 0 && !waivingAny ? "pointer" : "default", fontWeight: ex.lateFee && !waivingAny ? 600 : 400 }}>
                     Outstanding Late Fee
                     <span style={{ fontSize: 12, color: C.gray500, fontWeight: 400 }}>{lateFeeAmt > 0 ? ` (₹${lateFeeAmt.toLocaleString()})` : " (none)"}</span>
                   </label>
-                  <span style={{ fontSize: 13, fontWeight: 700, color: writeOffOutstanding && lateFeeAmt > 0 ? C.gray400 : (ex.lateFee ? C.red : C.gray400), minWidth: 60, textAlign: "right" }}>
-                    {writeOffOutstanding && lateFeeAmt > 0 ? "Waived Off" : (ex.lateFee ? `₹${lateFeeAmt.toLocaleString()}` : "—")}
+                  <span style={{ fontSize: 13, fontWeight: 700, color: waivingAny && lateFeeAmt > 0 ? C.gray400 : (ex.lateFee ? C.red : C.gray400), minWidth: 60, textAlign: "right" }}>
+                    {waivingAny && lateFeeAmt > 0 ? "Waived Off" : (ex.lateFee ? `₹${lateFeeAmt.toLocaleString()}` : "—")}
                   </span>
                 </div>
 
@@ -5291,41 +5343,66 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                 </div>
               </div>
 
-              {/* Last Paid Month — controls what gets written to the status table */}
+              {/* Months outstanding — the librarian sets each one independently. This is what makes
+                  a genuine partial payment representable: "leave" writes no row, so the month stays
+                  in arrears even once a later month is settled. */}
               <div style={{ background: C.gray50, borderRadius: 10, padding: "14px 16px", marginBottom: 18, border: `1px solid ${C.gray100}` }}>
-                <div style={{ fontSize: 12, color: C.gray600, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 }}>Last Paid Month</div>
-                <div style={{ display: "flex", gap: 18, marginBottom: collectMode === "partial" ? 12 : 0 }}>
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer", fontWeight: collectMode === "total" ? 700 : 400, color: collectMode === "total" ? C.gray900 : C.gray600 }}>
-                    <input type="radio" name="collectMode" checked={collectMode === "total"} onChange={() => setCollectMode("total")} style={{ accentColor: C.green, cursor: "pointer" }} />
-                    Total Due
-                  </label>
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: writeOffOutstanding ? "not-allowed" : "pointer", fontWeight: collectMode === "partial" ? 700 : 400, color: writeOffOutstanding ? C.gray400 : (collectMode === "partial" ? C.gray900 : C.gray600) }}>
-                    <input type="radio" name="collectMode" checked={collectMode === "partial"} disabled={writeOffOutstanding} onChange={() => setCollectMode("partial")} style={{ accentColor: C.green, cursor: writeOffOutstanding ? "not-allowed" : "pointer" }} />
-                    Partial / Advance
-                  </label>
+                <div style={{ fontSize: 12, color: C.gray600, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>Months Outstanding</div>
+                <div style={{ fontSize: 12, color: C.gray600, marginBottom: 10 }}>
+                  Mark each month the member is settling. <strong>Pay</strong> records the fee collected,
+                  <strong> Waive</strong> forgives it at ₹0, <strong> Leave</strong> keeps it owed.
                 </div>
-                {collectMode === "total" && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: `1px solid ${C.gray100}`, marginBottom: 8 }}>
-                    <input type="checkbox" id="re-writeoff"
-                      checked={writeOffOutstanding}
-                      disabled={!canWriteOff}
-                      onChange={() => setWriteOffOutstanding(prev => !prev)}
-                      style={{ width: 16, height: 16, accentColor: C.red, cursor: canWriteOff ? "pointer" : "not-allowed", flexShrink: 0 }} />
-                    <label htmlFor="re-writeoff" style={{ flex: 1, fontSize: 13, color: canWriteOff ? (writeOffOutstanding ? C.red : C.gray600) : C.gray400, cursor: canWriteOff ? "pointer" : "default", fontWeight: writeOffOutstanding ? 700 : 400 }}>
-                      Write Off Outstanding Amount
-                      <span style={{ fontSize: 12, color: C.gray500, fontWeight: 400 }}> — waives all arrears &amp; late fee; only {currentMonthLabel} is collected</span>
-                    </label>
-                  </div>
-                )}
-                {collectMode === "total" ? (
-                  <div style={{ fontSize: 12, color: C.gray600 }}>Marks the member paid through <strong>{currentMonthLabel}</strong>{writeOffOutstanding ? " (prior months waived off)" : ""}.</div>
-                ) : (
-                  <div>
-                    <div style={{ fontSize: 12, color: C.gray600, marginBottom: 6 }}>
-                      Choose the last month this payment covers — a past month if they're only paying part of what's owed, or a future month if they're paying in advance.
+
+                {allMonths.length === 0 ? (
+                  <div style={{ fontSize: 13, color: C.gray600, padding: "6px 0" }}>Nothing outstanding — add an advance month below to collect ahead.</div>
+                ) : allMonths.map((label, i) => {
+                  const choice = choiceFor(label);
+                  const isCurrent = label === currentMonthLabel;
+                  const isAdvance = advanceMonths.includes(label);
+                  const opts = [
+                    { key: "pay",   text: "Pay",   color: C.green },
+                    { key: "waive", text: "Waive", color: C.gray600 },
+                    { key: "leave", text: "Leave", color: C.red },
+                  ];
+                  return (
+                    <div key={label} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: i > 0 ? `1px solid ${C.gray100}` : "none" }}>
+                      <span style={{ flex: 1, fontSize: 13, fontWeight: isCurrent ? 700 : 500, color: C.gray900 }}>
+                        {label}
+                        {isCurrent && <span style={{ fontSize: 11, color: C.blue, fontWeight: 600 }}> · this month</span>}
+                        {isAdvance && <span style={{ fontSize: 11, color: C.gray500, fontWeight: 600 }}> · advance</span>}
+                      </span>
+                      <span style={{ fontSize: 12, color: C.gray600, minWidth: 46, textAlign: "right" }}>
+                        {choice === "pay" ? `₹${monthlyCost.toLocaleString()}` : choice === "waive" ? "₹0" : `₹${monthlyCost.toLocaleString()}`}
+                      </span>
+                      <div style={{ display: "flex", gap: 4 }}>
+                        {opts.map(o => (
+                          <button key={o.key} onClick={() => setChoice(label, o.key)}
+                            style={{
+                              padding: "4px 9px", borderRadius: 5, fontSize: 12, fontFamily: "inherit", cursor: "pointer",
+                              fontWeight: choice === o.key ? 700 : 400,
+                              border: `1px solid ${choice === o.key ? o.color : C.gray200}`,
+                              background: choice === o.key ? o.color : C.white,
+                              color: choice === o.key ? C.white : C.gray600,
+                            }}>{o.text}</button>
+                        ))}
+                      </div>
                     </div>
-                    <input type="month" value={manualPaidMonth || defaultMonthValue} min={dueBaseMonthValue} onChange={e => setManualPaidMonth(e.target.value)}
-                      style={{ padding: "8px 10px", borderRadius: 6, border: `1px solid ${C.gray300}`, fontSize: 13, fontFamily: "inherit" }} />
+                  );
+                })}
+
+                {/* Advance payment — some members pay several months ahead */}
+                <div style={{ display: "flex", alignItems: "center", gap: 10, paddingTop: 12, marginTop: 4, borderTop: `1px solid ${C.gray200}` }}>
+                  <span style={{ flex: 1, fontSize: 13, color: C.gray600 }}>Pay in advance (months beyond {currentMonthLabel})</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <button style={qtyBtn} onClick={() => setAdvanceCount(prev => Math.max(0, prev - 1))}>−</button>
+                    <span style={{ fontSize: 13, fontWeight: 700, minWidth: 18, textAlign: "center" }}>{advanceCount}</span>
+                    <button style={qtyBtn} onClick={() => setAdvanceCount(prev => Math.min(12, prev + 1))}>+</button>
+                  </div>
+                </div>
+
+                {leaveMonths.length > 0 && (
+                  <div style={{ fontSize: 12, color: C.red, marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.gray100}`, lineHeight: 1.6 }}>
+                    <strong>{leaveMonths.join(", ")}</strong> will stay outstanding — the member remains on the Renewals list for {leaveMonths.length === 1 ? "it" : "them"}.
                   </div>
                 )}
               </div>
@@ -5346,10 +5423,12 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
               </div>
 
               <p style={{ fontSize: 13, color: C.gray600, margin: "0 0 18px" }}>
-                Check applicable charges, collect payment, then click <strong>Confirm & Renew</strong>.
+                {nothingToRecord
+                  ? "Every month is marked Leave and no charges are ticked — nothing would be recorded."
+                  : <>Check applicable charges, collect payment, then click <strong>Confirm &amp; Renew</strong>.</>}
               </p>
               <div style={{ display: "flex", gap: 10 }}>
-                <Btn onClick={confirmRenew} variant="primary" icon="check">Confirm & Renew</Btn>
+                <Btn onClick={confirmRenew} variant="primary" icon="check" disabled={nothingToRecord}>Confirm &amp; Renew</Btn>
                 <Btn onClick={closeModal} variant="ghost">Cancel</Btn>
               </div>
             </div>
