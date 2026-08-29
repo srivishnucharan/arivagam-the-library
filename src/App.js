@@ -1794,8 +1794,10 @@ const MemberDashboard = ({ user, books, transactions, requests, waitlist, settin
   // ── Renewal banner logic ──
   // Plan comes from the status table (where the librarian records plan changes); the member's own
   // membership_plan is only the fallback for members with no status row yet.
-  const memberPlanRef = (memberStatuses || [])
-    .find(st => st.memberId === (user.membershipId || user.id))?.membershipPlan || user.plan || null;
+  const memberStatusRow = (memberStatuses || []).find(st => st.memberId === (user.membershipId || user.id));
+  // A closed membership keeps its login and its lifetime walk-in reading; only borrowing stops.
+  const membershipClosed = /^closed/i.test((memberStatusRow?.status || "").trim());
+  const memberPlanRef = memberStatusRow?.membershipPlan || user.plan || null;
   const memberPlan = findPlan(settings.plans || DEFAULT_PLANS, memberPlanRef);
   const memberPlanName = planDisplayLabel(memberPlanRef, settings.plans || DEFAULT_PLANS);
   const getMemberRenewalDue = () => {
@@ -1807,7 +1809,7 @@ const MemberDashboard = ({ user, books, transactions, requests, waitlist, settin
   };
   const renewalDue = getMemberRenewalDue();
   const renewalDiff = renewalDue ? Math.ceil((new Date(renewalDue) - new Date(today())) / 86400000) : null;
-  const showRenewalBanner = renewalDiff !== null && renewalDiff <= (settings.library?.renewalReminderDays || 5);
+  const showRenewalBanner = !membershipClosed && renewalDiff !== null && renewalDiff <= (settings.library?.renewalReminderDays || 5);
   // Include overdue membership fee in outstanding amount
   const membershipOverdueFee = (renewalDiff !== null && renewalDiff < 0 && memberPlan) ? memberPlan.cost : 0;
   const totalFees = lateFees + (user.fees || 0) + membershipOverdueFee;
@@ -1833,7 +1835,11 @@ const MemberDashboard = ({ user, books, transactions, requests, waitlist, settin
             <p style={{ margin: "4px 0 0", opacity: .8, fontSize: 13 }}>
               {user.status === "approved" ? `Member ID: ${user.membershipId || user.id}` : "Membership Pending"}
             </p>
-            {memberPlanName && (
+            {membershipClosed ? (
+              <p style={{ margin: "4px 0 0", fontSize: 13, opacity: .9, fontWeight: 600 }}>
+                Membership closed · In-library reading only
+              </p>
+            ) : memberPlanName && (
               <p style={{ margin: "4px 0 0", fontSize: 13, opacity: .9, fontWeight: 600 }}>
                 {memberPlanName}
                 {user.membershipType && ` · ${user.membershipType.charAt(0).toUpperCase() + user.membershipType.slice(1)}`}
@@ -1841,7 +1847,7 @@ const MemberDashboard = ({ user, books, transactions, requests, waitlist, settin
               </p>
             )}
           </div>
-          <Badge label={user.status === "approved" ? "Active Member" : "Pending Approval"} color={user.status === "approved" ? C.gold : C.orange} size="lg" />
+          <Badge label={membershipClosed ? "Reading Member" : user.status === "approved" ? "Active Member" : "Pending Approval"} color={membershipClosed ? C.greenLight : user.status === "approved" ? C.gold : C.orange} size="lg" />
         </div>
       </div>
 
@@ -3104,9 +3110,13 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     const note = noteParts.join(" · ");
     const newComments = [m.comments, note].filter(Boolean).join("\n");
 
+    // The login is deliberately left intact. The one-time registration fee buys lifetime walk-in
+    // reading, which closing a membership does not take away — it only ends the right to carry
+    // books home. Borrowing is blocked off the Closed status instead (see handleRequestBorrow and
+    // handleJoinWaitlist), so a closed member can still sign in and search the catalogue.
     try {
       const { data, error } = await supabase.from("users")
-        .update({ approval_status: "closed", comments: newComments })
+        .update({ comments: newComments })
         .eq("id", m.id).select().single();
       if (error) throw error;
       setMembers(prev => prev.map(x => x.id === m.id ? dbToUser(data) : x));
@@ -5423,7 +5433,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
             lines.push("", `Will be cancelled: ${[openReqs.length ? `${openReqs.length} pending request${openReqs.length !== 1 ? "s" : ""}` : null,
               openWaits.length ? `${openWaits.length} waitlist entr${openWaits.length !== 1 ? "ies" : "y"}` : null].filter(Boolean).join(" and ")}`);
           }
-          lines.push("", "The member will no longer be able to log in.");
+          lines.push("", "They keep their login and in-library reading — only borrowing stops.");
           if (!window.confirm(lines.join("\n"))) return;
           closeMembership(m, { ...closeForm, warnings });
         };
@@ -5505,8 +5515,9 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
 
               <div style={{ background: C.gray50, borderRadius: 8, padding: "10px 14px", fontSize: 11.5, color: C.gray600, lineHeight: 1.6, marginBottom: 18 }}>
                 Closing will mark the membership <strong>Closed</strong>, record the refund in Payments as
-                a <strong>Refund - Deposit</strong> row, revoke the member's login, and cancel any pending
-                requests and waitlist entries (returning the held copies to the shelf).
+                a <strong>Refund - Deposit</strong> row, and cancel any pending requests and waitlist
+                entries (returning the held copies to the shelf). The member <strong>keeps their
+                login and their lifetime in-library reading</strong> — they just can no longer borrow.
               </div>
 
               <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
@@ -6292,9 +6303,20 @@ export default function App() {
     navigate("home");
   }, [navigate]);
 
+  // Registration buys lifetime walk-in reading, so a closed membership keeps its login and can
+  // still search the catalogue — it just loses the right to take books home. Every borrowing path
+  // checks this off the status table, which is where closure is recorded.
+  const membershipClosed = /^closed/i.test(
+    ((memberStatuses || []).find(st => st.memberId === (user?.membershipId || user?.id))?.status || "").trim()
+  );
+
   // Member places a borrow request — immediately decrements available so card shows Checked Out
   const handleRequestBorrow = useCallback(async (book) => {
     if (!user || user.role !== "member") return;
+    if (membershipClosed) {
+      showToast("Your membership is closed. You can still read in the library any time — take a membership to borrow books.", "error");
+      return;
+    }
     // Guard: overdue membership blocks borrowing
     const statusPlanRef = (memberStatuses || [])
       .find(st => st.memberId === (user.membershipId || user.id))?.membershipPlan || user.plan || null;
@@ -6344,11 +6366,15 @@ export default function App() {
       showToast(`Could not place request: ${msg}`, "error");
       console.error("Borrow request failed:", err);
     }
-  }, [user, requests, transactions, settings, memberStatuses, showToast]);
+  }, [user, requests, transactions, settings, memberStatuses, membershipClosed, showToast]);
 
   // Member joins the waitlist for a fully-borrowed book
   const handleJoinWaitlist = useCallback(async (book) => {
     if (!user || user.role !== "member") return;
+    if (membershipClosed) {
+      showToast("Your membership is closed. Take a membership to reserve and borrow books.", "error");
+      return;
+    }
     const alreadyOn = waitlist.some(w => w.bookId === book.id && w.memberId === user.id && w.status === "waiting");
     if (alreadyOn) { showToast("You are already on the waitlist for this book.", "info"); return; }
     const position = waitlist.filter(w => w.bookId === book.id && w.status === "waiting").length + 1;
@@ -6368,7 +6394,7 @@ export default function App() {
       }]);
     }
     showToast(`Added to waitlist for "${book.title}" at position ${position}.`);
-  }, [user, waitlist, showToast]);
+  }, [user, waitlist, membershipClosed, showToast]);
 
   // Register new member
   const handleRegister = useCallback((newMember) => {
