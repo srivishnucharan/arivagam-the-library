@@ -203,12 +203,54 @@ const deriveDefaultPassword = (name, dob) => {
 
 // ─── DEFAULT SETTINGS ─────────────────────────────────────────────────────────
 const DEFAULT_PLANS = [
-  { id: "plan-basic",   name: "Leisure Reader",    borrowLimit: 2, cost: 300,  refundableDeposit: 500  },
-  { id: "plan-pro",     name: "Standard Reader",   borrowLimit: 3, cost: 500,  refundableDeposit: 750  },
-  { id: "plan-power",   name: "Voracious Reader",  borrowLimit: 4, cost: 800,  refundableDeposit: 1000 },
-  { id: "plan-super",   name: "Super Reader",      borrowLimit: 5, cost: 1200, refundableDeposit: 1250 },
+  { id: "plan-basic",   name: "Leisure Reader",    borrowLimit: 1, cost: 200, refundableDeposit: 500  },
+  { id: "plan-pro",     name: "Standard Reader",   borrowLimit: 2, cost: 250, refundableDeposit: 750  },
+  { id: "plan-power",   name: "Voracious Reader",  borrowLimit: 3, cost: 300, refundableDeposit: 1000 },
+  { id: "plan-super",   name: "Super Reader",      borrowLimit: 4, cost: 350, refundableDeposit: 1250 },
   { id: "plan-inhouse", name: "Inhouse Reading",   borrowLimit: 0, cost: 0,    refundableDeposit: 0, inhouseOnly: true },
 ];
+
+// The library names the same five plans two ways. The status table and the older payments rows
+// use borrow counts ("1 Book", "2 Books", "In Library Reading"); users.membership_plan and Fee
+// Settings use the reader names. Everything the user sees should read as the reader name, so map
+// the count vocabulary onto it. Keys are normalized by normalizePlanKey below.
+const PLAN_NAME_ALIASES = {
+  "1 book":             "Leisure Reader",
+  "2 book":             "Standard Reader",
+  "3 book":             "Voracious Reader",
+  "4 book":             "Super Reader",
+  "in library reading": "Inhouse Reading",
+  "inhouse reading":    "Inhouse Reading",
+};
+// Squashes the spelling drift the sheet has accumulated over the years — "1 Book Plan",
+// "1 Boook", "2-Books" all normalize to the same key.
+const normalizePlanKey = (raw) => String(raw || "").trim().toLowerCase()
+  .replace(/boook/g, "book")
+  .replace(/[-_]+/g, " ")
+  .replace(/\bplan\b/g, "")
+  .replace(/\s+/g, " ")
+  .trim()
+  .replace(/s$/, "");
+// "2 Books" -> "Standard Reader"; anything with no alias (e.g. "6 Books", "PIE", "Donor") -> "".
+const canonicalPlanName = (raw) => PLAN_NAME_ALIASES[normalizePlanKey(raw)] || "";
+// Resolves any plan reference against the configured plans: a plan id ("plan-pro"), a plan name
+// ("Standard Reader"), or a status-table label ("2 Books"). Returns null when nothing matches.
+const findPlan = (planList, ref) => {
+  if (!ref) return null;
+  const list = planList || DEFAULT_PLANS;
+  const key = String(ref).trim().toLowerCase();
+  const byName = (name) => name && list.find(pl => String(pl.name || "").trim().toLowerCase() === name);
+  const normalized = normalizePlanKey(ref);
+  return list.find(pl => pl.id === ref)
+      || byName(key)
+      || byName(canonicalPlanName(ref).toLowerCase())
+      || (normalized ? list.find(pl => normalizePlanKey(pl.name) === normalized) : null)
+      || null;
+};
+// What to print for a plan reference: the configured plan's name, else the canonical reader name,
+// else the raw text so unmapped labels ("6 Books", "PIE") still show something truthful.
+const planDisplayLabel = (ref, planList) =>
+  findPlan(planList, ref)?.name || canonicalPlanName(ref) || (ref ? String(ref).trim() : "");
 
 const DEFAULT_SETTINGS = {
   sections: {
@@ -1728,7 +1770,7 @@ const BookDetailModal = ({ book, onClose, user, onRequest, onWaitlist, transacti
 // ─────────────────────────────────────────────────────────────────────────────
 // MEMBER DASHBOARD
 // ─────────────────────────────────────────────────────────────────────────────
-const MemberDashboard = ({ user, books, transactions, requests, waitlist, settings, onNavigate, onRequestRenewal }) => {
+const MemberDashboard = ({ user, books, transactions, requests, waitlist, settings, memberStatuses, onNavigate, onRequestRenewal }) => {
   const myActive    = transactions.filter(t => t.memberId === user.id && !t.returnDate);
   const myHistory   = transactions.filter(t => t.memberId === user.id && t.returnDate);
   const myRequests  = (requests || []).filter(r => r.memberId === user.id);
@@ -1750,10 +1792,15 @@ const MemberDashboard = ({ user, books, transactions, requests, waitlist, settin
   }, []);
 
   // ── Renewal banner logic ──
-  const memberPlan = user.plan ? (settings.plans || DEFAULT_PLANS).find(p => p.id === user.plan) : null;
+  // Plan comes from the status table (where the librarian records plan changes); the member's own
+  // membership_plan is only the fallback for members with no status row yet.
+  const memberPlanRef = (memberStatuses || [])
+    .find(st => st.memberId === (user.membershipId || user.id))?.membershipPlan || user.plan || null;
+  const memberPlan = findPlan(settings.plans || DEFAULT_PLANS, memberPlanRef);
+  const memberPlanName = planDisplayLabel(memberPlanRef, settings.plans || DEFAULT_PLANS);
   const getMemberRenewalDue = () => {
     const base = user.planRenewedAt || user.joined;
-    if (!base || !user.plan) return null;
+    if (!base || !memberPlanRef) return null;
     const d = new Date(base);
     d.setMonth(d.getMonth() + 1);
     return d.toISOString().split("T")[0];
@@ -1786,11 +1833,11 @@ const MemberDashboard = ({ user, books, transactions, requests, waitlist, settin
             <p style={{ margin: "4px 0 0", opacity: .8, fontSize: 13 }}>
               {user.status === "approved" ? `Member ID: ${user.membershipId || user.id}` : "Membership Pending"}
             </p>
-            {memberPlan && (
+            {memberPlanName && (
               <p style={{ margin: "4px 0 0", fontSize: 13, opacity: .9, fontWeight: 600 }}>
-                {memberPlan.name}
+                {memberPlanName}
                 {user.membershipType && ` · ${user.membershipType.charAt(0).toUpperCase() + user.membershipType.slice(1)}`}
-                {` · Up to ${memberPlan.borrowLimit} book${memberPlan.borrowLimit !== 1 ? "s" : ""}`}
+                {memberPlan && ` · Up to ${memberPlan.borrowLimit} book${memberPlan.borrowLimit !== 1 ? "s" : ""}`}
               </p>
             )}
           </div>
@@ -1819,7 +1866,7 @@ const MemberDashboard = ({ user, books, transactions, requests, waitlist, settin
                 </div>
               </div>
               <div style={{ fontSize: 13, color: C.gray600, marginBottom: 4 }}>
-                <strong>{memberPlan?.name}</strong> · ₹{memberPlan?.cost}/month · Due: <strong>{renewalDue}</strong>
+                <strong>{memberPlanName}</strong> · ₹{memberPlan?.cost}/month · Due: <strong>{renewalDue}</strong>
               </div>
               {!qrSrc && (
                 <div style={{ fontSize: 12, color: C.gray600, marginTop: 4, fontStyle: "italic" }}>
@@ -2260,12 +2307,21 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const pendingRequestsCount = (requests || []).filter(r => r.status === "pending").length;
 
   // ── Plan resolution ──
-  // membership_plan on Users is either a plan id (members added/edited via the form) or a
-  // plan name string (legacy/imported members) — resolve both ways so lookups never miss.
+  // The status table is authoritative for a member's *current* plan. The librarian records plan
+  // changes there (and on the latest payments row) but not on the member record, so
+  // users.membership_plan drifts stale — it is only a fallback for members with no status row yet.
+  // membership_plan on Users is either a plan id (members added/edited via the form) or a plan
+  // name string (legacy/imported members), and status names the same plan "2 Books" rather than
+  // "Standard Reader" — findPlan resolves all three forms.
   const planList = settings.plans || DEFAULT_PLANS;
-  const planMap = Object.fromEntries(planList.map(p => [p.id, p]));
-  const planByName = Object.fromEntries(planList.map(p => [p.name.toLowerCase(), p]));
-  const resolvePlan = (planKey) => planMap[planKey] || planByName[(planKey || "").toLowerCase()] || null;
+  const resolvePlan = (planKey) => findPlan(planList, planKey);
+  const statusPlanByMemberId = Object.fromEntries((memberStatuses || [])
+    .filter(s => s.memberId && s.membershipPlan)
+    .map(s => [s.memberId, s.membershipPlan]));
+  const statusPlanRef = (m) => (m ? statusPlanByMemberId[m.membershipId || m.id] : null) || null;
+  const memberPlanRef = (m) => statusPlanRef(m) || m?.plan || null;
+  const resolveMemberPlan = (m) => resolvePlan(memberPlanRef(m));
+  const memberPlanLabel = (m) => planDisplayLabel(memberPlanRef(m), planList);
 
   // ── Renewal helpers ──
   // Base = status table: last_paid_month before the current month (or never paid),
@@ -2335,7 +2391,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       // when the plan can't be resolved (book_plan text drifted over the years: "2 Books" pre-dates
       // the current "Standard Reader"-style plan names).
       const latestSub = subs.slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).pop();
-      const monthlyCost = resolvePlan(member?.plan)?.cost || latestSub?.amountPaid || 0;
+      const monthlyCost = resolvePlan(s.membershipPlan || member?.plan)?.cost || latestSub?.amountPaid || 0;
       // Arrears = every month with no payments row between the cutoff and last month. Counting
       // *gaps* rather than walking backwards from last month is what lets a member be paid up for
       // August and still owe May — a backward walk stopped at the first paid month it hit, so any
@@ -2372,8 +2428,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         ...(member || {}),
         id: member?.id || s.id, membershipId: s.memberId,
         name: latestSub?.childMemberName || member?.name || s.memberName || s.memberId,
-        plan: member?.plan || null,
-        planLabel: latestSub?.bookPlan || s.membershipPlan || null,
+        plan: s.membershipPlan || member?.plan || null,
+        planLabel: planDisplayLabel(s.membershipPlan || member?.plan, planList) || null,
         renewalDue: localISODate(dueBase), bucket,
         statusLastPaidMonth: latestSub?.feePaidMonth || s.lastPaidMonth || null,
         overdueMonths, overdueAmount, dueThisMonthAmount, penaltyFees, totalOutstanding,
@@ -2619,6 +2675,21 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
         const { data, error } = await supabase.from("users").update(updateData).eq("id", editMember.id).select().single();
         if (error) throw error;
         setMembers(members.map(m => m.id === editMember.id ? dbToUser(data) : m));
+        // Plan is read back from the status table everywhere in the app, so mirror the change
+        // there too — otherwise a plan edited here would silently keep displaying the old plan.
+        if (memberForm.plan && editMember.membershipId) {
+          try {
+            const { data: updatedStatus, error: statusErr } = await supabase.from("status")
+              .update({ membership_plan: membershipPlanName })
+              .eq("member_id", editMember.membershipId)
+              .select();
+            if (statusErr) throw statusErr;
+            if (updatedStatus?.length) {
+              setMemberStatuses(prev => prev.map(st => st.memberId === editMember.membershipId
+                ? { ...st, membershipPlan: membershipPlanName } : st));
+            }
+          } catch (err) { console.error("saveMember: status.membership_plan update failed —", err?.message || err); }
+        }
         showToast(`Member "${memberForm.name}" updated.`);
       } catch (err) {
         console.error("saveMember: users.update failed —", err?.message || err);
@@ -3470,7 +3541,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
               <div style={{ padding: "32px 18px", textAlign: "center", color: C.gray600, fontSize: 13 }}>No members match your search.</div>
             )}
             {filteredMembers.map((m, i) => {
-              const plan = resolvePlan(m.plan);
+              const planLabel = memberPlanLabel(m);
               return (
                 <div key={m.id} style={{ borderTop: i > 0 ? `1px solid ${C.gray100}` : "none" }}>
                   <div className="members-tbl-row" onClick={() => setSelectedMember(m)}
@@ -3488,7 +3559,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
                     </div>
                     <div style={{ fontSize: 12, color: C.gray600, minWidth: 0, wordBreak: "break-word" }}>{m.email}{m.phone && <><br />{m.phone}</>}</div>
                     <div style={{ fontSize: 12, color: C.gray600 }}>
-                      {plan && <div style={{ color: C.blue, fontWeight: 600 }}>{plan.name}</div>}
+                      {planLabel && <div style={{ color: C.blue, fontWeight: 600 }}>{planLabel}</div>}
                       {m.joined}
                     </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
@@ -3522,7 +3593,7 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
                         <div style={{ fontSize: 11, color: "#7D4E1A", marginTop: 2 }}>Review &amp; Renew</div>
                       </div>
                       <button
-                        onClick={() => setRenewModal({ member: m, plan: resolvePlan(m.plan) })}
+                        onClick={() => setRenewModal({ member: m, plan: resolveMemberPlan(m) })}
                         style={{ background: "#E67E22", color: "#fff", border: "none", borderRadius: 6, padding: "5px 10px", fontSize: 11, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
                         Renew Now
                       </button>
@@ -3539,7 +3610,8 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       {/* ══ MEMBER DETAIL VIEW ══ */}
       {tab === "members" && selectedMember && (() => {
         const m = members.find(x => x.id === selectedMember.id) || selectedMember;
-        const plan = resolvePlan(m.plan);
+        const plan = resolveMemberPlan(m);
+        const planLabel = memberPlanLabel(m);
         const mTxns = transactions.filter(t => t.memberId === m.id);
         const activeLoans = mTxns.filter(t => !t.returnDate);
         const history = mTxns.filter(t => t.returnDate);
@@ -3576,7 +3648,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                     { label: "Phone",   value: m.phone || "—" },
                     { label: "Joined",  value: m.joined },
                     { label: "Type",    value: m.membershipType ? m.membershipType.charAt(0).toUpperCase() + m.membershipType.slice(1) : "—" },
-                    { label: "Plan",    value: plan ? plan.name : "No plan assigned" },
+                    { label: "Plan",    value: planLabel || "No plan assigned" },
                   ].map(({ label, value }) => (
                     <div key={label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.gray100}`, fontSize: 13 }}>
                       <span style={{ color: C.gray600, fontWeight: 600 }}>{label}</span>
@@ -3738,7 +3810,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                         {mPayments.map((p, i) => (
                           <div key={p.id} className="revenue-tbl-inner" style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr 1fr 1fr 1fr 1fr", padding: "12px 16px", borderTop: `1px solid ${C.gray100}`, alignItems: "center", background: i % 2 === 0 ? C.white : C.gray50 }}>
                             <span style={{ fontSize: 13, color: C.gray700 }}>{p.date || "—"}</span>
-                            <span style={{ fontSize: 13, color: C.gray700 }}>{p.bookPlan || "—"}</span>
+                            <span style={{ fontSize: 13, color: C.gray700 }}>{planDisplayLabel(p.bookPlan, planList) || "—"}</span>
                             <span style={{ fontSize: 14, fontWeight: 700, color: C.greenMid }}>₹{p.amountPaid.toLocaleString()}</span>
                             <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentMethod || "—"}</span>
                             <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentType || "—"}</span>
@@ -4088,7 +4160,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
           return `https://wa.me/${phone.startsWith("91") ? phone : "91" + phone}?text=${encodeURIComponent(msg)}`;
         };
         const renderRow = (m, i) => {
-          const plan = resolvePlan(m.plan);
+          const plan = resolveMemberPlan(m);
           const overdue = m.bucket === "overdue";
           const waLink = makeWhatsAppLink(m, plan);
           return (
@@ -4240,7 +4312,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
           if (!q) return true;
           const haystack = [
             p.memberId, member?.name, p.childMemberName,
-            p.bookPlan, p.paymentMethod, p.paymentType,
+            p.bookPlan, planDisplayLabel(p.bookPlan, planList), p.paymentMethod, p.paymentType,
             p.feePaidMonth, p.fromAccount, p.panNo, p.date,
             String(p.amountPaid),
           ].filter(Boolean).join(" ").toLowerCase();
@@ -4277,7 +4349,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                         )}
                         <div style={{ fontSize: 12, color: C.gray600 }}>{member?.name || p.childMemberName || "—"}</div>
                       </div>
-                      <span style={{ fontSize: 13, color: C.gray700 }}>{p.bookPlan || "—"}</span>
+                      <span style={{ fontSize: 13, color: C.gray700 }}>{planDisplayLabel(p.bookPlan, planList) || "—"}</span>
                       <span style={{ fontSize: 14, fontWeight: 700, color: C.greenMid }}>₹{p.amountPaid.toLocaleString()}</span>
                       <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentMethod || "—"}</span>
                       <span style={{ fontSize: 13, color: C.gray700 }}>{p.paymentType || "—"}</span>
@@ -4639,7 +4711,6 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
 
       {/* ══ REVENUE TAB (Admin only) ══ */}
       {tab === "revenue" && isAdmin && (() => {
-        const planMap = Object.fromEntries((settings.plans || DEFAULT_PLANS).map(p => [p.id, p]));
         const now = new Date();
 
         // Build last 12 months of revenue data from DB state
@@ -4651,16 +4722,16 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
 
           // Expected = plan cost × members who were active (joined on or before month end)
           const expected = members.reduce((sum, m) => {
-            if (!m.plan || !m.joined) return sum;
+            if (!memberPlanRef(m) || !m.joined) return sum;
             const joined = new Date(m.joined);
             if (joined > monthEnd) return sum;
-            return sum + (planMap[m.plan]?.cost || 0);
+            return sum + (resolveMemberPlan(m)?.cost || 0);
           }, 0);
 
           // Collected membership = plan cost for members who first joined OR renewed in this month
           const membershipCollected = members.reduce((sum, m) => {
-            if (!m.plan) return sum;
-            const cost = planMap[m.plan]?.cost || 0;
+            if (!memberPlanRef(m)) return sum;
+            const cost = resolveMemberPlan(m)?.cost || 0;
             const joinedDate   = m.joined        ? new Date(m.joined)        : null;
             const renewedDate  = m.planRenewedAt ? new Date(m.planRenewedAt) : null;
             const joinedInMonth  = joinedDate  && joinedDate  >= monthStart && joinedDate  <= monthEnd;
@@ -5129,7 +5200,7 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
       {/* ── RENEW MEMBER MODAL ── */}
       {renewModal && (() => {
         const { member: m, plan: modalPlan } = renewModal;
-        const plan = modalPlan || resolvePlan(m.plan);
+        const plan = modalPlan || resolveMemberPlan(m);
         const ex      = renewExtras;
         const resetExtras = () => setRenewExtras({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
         const closeModal = () => { setRenewModal(null); resetExtras(); setMonthChoices({}); setAdvanceCount(0); setCollectPayMethod("upi"); };
@@ -5922,7 +5993,9 @@ export default function App() {
   const handleRequestBorrow = useCallback(async (book) => {
     if (!user || user.role !== "member") return;
     // Guard: overdue membership blocks borrowing
-    const memberPlanForRenewal = user.plan ? (settings.plans || DEFAULT_PLANS).find(p => p.id === user.plan) : null;
+    const statusPlanRef = (memberStatuses || [])
+      .find(st => st.memberId === (user.membershipId || user.id))?.membershipPlan || user.plan || null;
+    const memberPlanForRenewal = findPlan(settings.plans || DEFAULT_PLANS, statusPlanRef);
     if (memberPlanForRenewal) {
       const renewalBase = user.planRenewedAt || user.joined;
       if (renewalBase) {
@@ -5942,7 +6015,7 @@ export default function App() {
     const activeLoan = transactions.find(tx => tx.bookId === book.id && tx.memberId === user.id && !tx.returnDate);
     if (activeLoan) { showToast("You already have this book checked out.", "info"); return; }
     // Guard: enforce plan borrow limit
-    const memberPlan = user.plan ? (settings.plans || DEFAULT_PLANS).find(p => p.id === user.plan) : null;
+    const memberPlan = findPlan(settings.plans || DEFAULT_PLANS, statusPlanRef);
     const borrowLimit = memberPlan ? memberPlan.borrowLimit : (settings.plans || DEFAULT_PLANS)[0]?.borrowLimit || 2;
     const activeCount = transactions.filter(tx => tx.memberId === user.id && !tx.returnDate).length
                       + requests.filter(r => r.memberId === user.id && r.status === "pending").length;
@@ -5968,7 +6041,7 @@ export default function App() {
       showToast(`Could not place request: ${msg}`, "error");
       console.error("Borrow request failed:", err);
     }
-  }, [user, requests, transactions, settings, showToast]);
+  }, [user, requests, transactions, settings, memberStatuses, showToast]);
 
   // Member joins the waitlist for a fully-borrowed book
   const handleJoinWaitlist = useCallback(async (book) => {
@@ -6033,7 +6106,7 @@ export default function App() {
       )}
 
       {page === "member" && user && (
-        <MemberDashboard user={user} books={books} transactions={transactions} requests={requests} waitlist={waitlist} settings={settings} onNavigate={navigate} onRequestRenewal={handleRequestRenewal} />
+        <MemberDashboard user={user} books={books} transactions={transactions} requests={requests} waitlist={waitlist} settings={settings} memberStatuses={memberStatuses} onNavigate={navigate} onRequestRenewal={handleRequestRenewal} />
       )}
 
       {page === "librarian" && user && (
