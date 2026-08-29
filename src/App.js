@@ -2024,8 +2024,8 @@ const MemberDashboard = ({ user, books, transactions, requests, waitlist, settin
                     <div style={{ fontSize: 12, color: C.gray600, marginTop: 2 }}>Requested on: {req.requestDate}</div>
                   </div>
                   <Badge
-                    label={req.status === "pending" ? "Pending Approval" : req.status === "approved" ? "Approved — Collect at Library" : "Rejected"}
-                    color={req.status === "pending" ? C.orange : req.status === "approved" ? C.greenMid : C.red}
+                    label={req.status === "pending" ? "Pending Approval" : req.status === "approved" ? "Approved — Collect at Library" : req.status === "cancelled" ? "Cancelled" : "Rejected"}
+                    color={req.status === "pending" ? C.orange : req.status === "approved" ? C.greenMid : req.status === "cancelled" ? C.gray600 : C.red}
                   />
                 </div>
               ))}
@@ -2238,6 +2238,9 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
   const [penaltyModal, setPenaltyModal] = useState(null); // { txn, member, lateAmt }
   const [penaltyExtras, setPenaltyExtras] = useState({ lateFee: false, lostBook: false, lostBookQty: 1, damagedBook: false, damagedBookQty: 1, cautionDeposit: false });
   const [penaltyShowQR, setPenaltyShowQR] = useState(false);
+  // Separation flow. { member } while open; the form carries the refund the librarian is issuing.
+  const [closeModal, setCloseModal] = useState(null);
+  const [closeForm, setCloseForm] = useState({ refundAmount: "", deductionNote: "", paymentMethod: "upi", date: "" });
   const [editingPlanId, setEditingPlanId] = useState(null);
   const [showImportModal, setShowImportModal] = useState(false);
   const [importHeaders, setImportHeaders] = useState([]);
@@ -2381,6 +2384,40 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
     if (!p.memberId) return;
     (paymentsByMember[p.memberId] || (paymentsByMember[p.memberId] = [])).push(p);
   });
+  // Months a member still owes: from max(join month, arrears cutoff) through the current month,
+  // minus anything already settled in payments. Sourced from payments.fee_paid_month, never
+  // status.last_paid_month, which drifts stale the moment a payment lands outside the app.
+  // Shared by Collect & Renew and Close Membership so the two can never disagree.
+  const outstandingMonthsFor = (m) => {
+    const subs = (payments || []).filter(p => p.memberId === (m?.membershipId || m?.id)
+      && /subscription/i.test(p.paymentType) && p.feePaidMonth);
+    const paidKeys = new Set(subs.map(p => normalizeMonthKey(p.feePaidMonth)).filter(Boolean));
+    const joined = m?.joined ? new Date(m.joined) : null;
+    const joinStart = joined && !isNaN(joined) ? new Date(joined.getFullYear(), joined.getMonth(), 1) : null;
+    const start = joinStart && arrearsFromMonthStart
+      ? new Date(Math.max(joinStart.getTime(), arrearsFromMonthStart.getTime()))
+      : (arrearsFromMonthStart || new Date(renewalCurrentMonthStart));
+    const months = [];
+    const cursor = new Date(start);
+    while (cursor <= renewalCurrentMonthStart) {
+      const label = monthKeyLabel(cursor);
+      if (!paidKeys.has(normalizeMonthKey(label))) months.push(label);
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
+    return { months, paidKeys };
+  };
+
+  // Deposit still sitting with the library = every Deposit row plus every Refund - Deposit row.
+  // Refunds are stored as negative amounts (and a handful of older refunds were filed as negative
+  // "Deposit" rows rather than "Refund - Deposit"), so summing across both types nets out right.
+  const depositSummaryFor = (m) => {
+    const rows = (payments || []).filter(p => p.memberId === (m?.membershipId || m?.id)
+      && /^(deposit|refund - deposit)$/i.test((p.paymentType || "").trim()));
+    const collected = rows.filter(p => p.amountPaid > 0).reduce((sum, p) => sum + p.amountPaid, 0);
+    const refunded  = rows.filter(p => p.amountPaid < 0).reduce((sum, p) => sum + Math.abs(p.amountPaid), 0);
+    return { collected, refunded, net: Math.max(0, collected - refunded) };
+  };
+
   const renewalDueMembers = (memberStatuses || [])
     .filter(s => s.status && INCLUDED_RENEWAL_STATUS.test(s.status.trim()))
     .map(s => {
@@ -3000,6 +3037,126 @@ const LibrarianDashboard = ({ books, setBooks, members, setMembers, librarians, 
       setMembers(members.map(m => m.id === memberId ? offlineMember : m));
       showToast(`Cancelled locally only — database update failed (${err?.message || "unknown error"}). Check console.`, "error");
     }
+  };
+
+  // ── Separation / Close Membership ──
+  // Opens the modal with the refund pre-filled to whatever deposit is still on record. The
+  // librarian can lower it (damage, unreturned book) and note why.
+  const openCloseMembership = (m) => {
+    const { net } = depositSummaryFor(m);
+    setCloseForm({ refundAmount: String(net || 0), deductionNote: "", paymentMethod: "upi", date: today() });
+    setCloseModal({ member: m });
+  };
+
+  // Writes, in order: the refund payments row, then status.status = Closed, then the member record
+  // (approval_status revokes the login, and a one-line audit note is appended to comments).
+  // The refund is written first and aborts the whole close on failure — closing a member whose
+  // refund was never recorded would leave the library owing money with nothing to show it.
+  // The two writes after it are each scoped so a late failure can't misreport what already landed.
+  const closeMembership = async (m, opts = {}) => {
+    const dateStr = opts.date || today();
+    const refund = Math.max(0, Number(opts.refundAmount) || 0);
+    const membershipId = m.membershipId || m.id;
+
+    if (refund > 0) {
+      try {
+        const { data, error } = await supabase.from("payments").insert({
+          date: dateStr, member_id: membershipId, child_member_name: m.name || "",
+          book_plan: memberPlanLabel(m) || null,
+          // Refunds are stored as a negative amount — matches all 87 existing refund rows.
+          amount_paid: -refund,
+          payment_method: opts.paymentMethod || null,
+          fee_paid_month: null, payment_type: "Refund - Deposit",
+        }).select().single();
+        if (error) throw error;
+        setPayments?.(prev => [...prev, dbToPayment(data)]);
+      } catch (err) {
+        console.error("closeMembership: refund payments.insert failed —", err?.message || err);
+        showToast(`Refund could not be recorded (${err?.message || "unknown error"}). Membership was NOT closed.`, "error");
+        return;
+      }
+    }
+
+    let statusClosed = false;
+    try {
+      const { data: updated, error: statusErr } = await supabase.from("status")
+        .update({ status: "Closed" }).eq("member_id", membershipId).select();
+      if (statusErr) throw statusErr;
+      if (updated?.length) {
+        setMemberStatuses(prev => prev.map(st => st.memberId === membershipId ? { ...st, status: "Closed" } : st));
+        statusClosed = true;
+      } else {
+        // No status row yet (member added directly in-app) — create one so the closure is recorded.
+        const { data: inserted, error: insertErr } = await supabase.from("status")
+          .insert({ member_id: membershipId, member_name: m.name || "", status: "Closed", membership_plan: memberPlanLabel(m) || null })
+          .select();
+        if (insertErr) throw insertErr;
+        if (inserted?.[0]) { setMemberStatuses(prev => [...prev, dbToMemberStatus(inserted[0])]); statusClosed = true; }
+      }
+    } catch (err) { console.error("closeMembership: status table write failed —", err?.message || err); }
+
+    // One line of history on the member record: what was refunded, what was deducted, and anything
+    // still outstanding at the moment of closure. Appended, never overwriting existing notes.
+    const noteParts = [`Membership closed ${dateStr}`];
+    noteParts.push(refund > 0 ? `deposit refund ₹${refund.toLocaleString()} via ${opts.paymentMethod || "—"}` : "no deposit refund");
+    if (opts.deductionNote) noteParts.push(`deduction: ${opts.deductionNote}`);
+    if (opts.warnings?.length) noteParts.push(`outstanding at closure: ${opts.warnings.join("; ")}`);
+    const note = noteParts.join(" · ");
+    const newComments = [m.comments, note].filter(Boolean).join("\n");
+
+    try {
+      const { data, error } = await supabase.from("users")
+        .update({ approval_status: "closed", comments: newComments })
+        .eq("id", m.id).select().single();
+      if (error) throw error;
+      setMembers(prev => prev.map(x => x.id === m.id ? dbToUser(data) : x));
+    } catch (err) {
+      console.error("closeMembership: users.update failed —", err?.message || err);
+      showToast(`Membership marked Closed${statusClosed ? "" : " (status table not updated)"}, but the member record could not be updated (${err?.message || "unknown error"}). Check console.`, "error");
+      setCloseModal(null);
+      return;
+    }
+
+    // Closing releases whatever the member was holding in the queues. A pending borrow request
+    // had already decremented available_copies when it was placed, so cancelling one has to put
+    // that copy back exactly as the Reject button does — otherwise the book stays invisible in the
+    // catalogue forever. Waitlist entries are cancelled and the queue behind them renumbered.
+    // Both loops are scoped so a failure here cannot undo or misreport the closure itself.
+    const openReqs = (requests || []).filter(r => r.memberId === m.id && r.status === "pending");
+    const openWaits = (waitlist || []).filter(w => w.memberId === m.id && (w.status === "waiting" || w.status === "reserved"));
+
+    for (const req of openReqs) {
+      try {
+        const { error: reqErr } = await supabase.from("borrow_requests").update({ status: "cancelled" }).eq("id", req.id);
+        if (reqErr) throw reqErr;
+        const { data: bookRow } = await supabase.from("books").select("available_copies").eq("id", req.bookId).single();
+        if (bookRow) await supabase.from("books").update({ available_copies: (bookRow.available_copies || 0) + 1 }).eq("id", req.bookId);
+        if (req.copyId) await supabase.from("book_copies").update({ status: "available" }).eq("id", req.copyId);
+        setRequests(prev => prev.map(r => r.id === req.id ? { ...r, status: "cancelled" } : r));
+        setBooks(prev => prev.map(b => b.id === req.bookId ? { ...b, available: (b.available || 0) + 1 } : b));
+        if (req.copyId) setBookCopies(prev => prev.map(c => c.id === req.copyId ? { ...c, status: "available" } : c));
+      } catch (err) { console.error("closeMembership: cancelling borrow request failed —", err?.message || err); }
+    }
+
+    if (openWaits.length) {
+      try {
+        const { error: waitErr } = await supabase.from("book_waitlist")
+          .update({ status: "cancelled" }).in("id", openWaits.map(w => w.id));
+        if (waitErr) throw waitErr;
+        setWaitlist(prev => prev.filter(w => !openWaits.some(x => x.id === w.id)));
+        // Renumber each affected queue so the members left behind keep contiguous positions.
+        [...new Set(openWaits.map(w => w.bookId))].forEach(reorderWaitlist);
+      } catch (err) { console.error("closeMembership: cancelling waitlist entries failed —", err?.message || err); }
+    }
+
+    setCloseModal(null);
+    const released = [];
+    if (openReqs.length)  released.push(`${openReqs.length} pending request${openReqs.length !== 1 ? "s" : ""}`);
+    if (openWaits.length) released.push(`${openWaits.length} waitlist entr${openWaits.length !== 1 ? "ies" : "y"}`);
+    const releasedText = released.length ? ` ${released.join(" and ")} cancelled.` : "";
+    showToast(refund > 0
+      ? `Membership closed. ₹${refund.toLocaleString()} deposit refunded to ${m.name}.${releasedText}`
+      : `Membership closed for ${m.name}.${releasedText}`);
   };
 
   const renewMember = async (memberId, extras = {}) => {
@@ -3709,6 +3866,17 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                     {(m.approvalStatus || "").trim().toLowerCase() === "pending" && (
                       <Btn variant="danger" icon="x" onClick={() => cancelMember(m.id)}>Cancel Request</Btn>
                     )}
+                    {/* Separation. Hidden once the membership is already closed, and for members
+                        still awaiting approval — those get Cancel Request instead. */}
+                    {(m.approvalStatus || "").trim().toLowerCase() !== "pending" && (
+                      /^closed/i.test(membershipStatus) ? (
+                        <div style={{ background: C.gray50, border: `1px solid ${C.gray100}`, borderRadius: 8, padding: "10px 12px", fontSize: 12, color: C.gray600, textAlign: "center" }}>
+                          Membership closed
+                        </div>
+                      ) : (
+                        <Btn variant="danger" icon="logout" onClick={() => openCloseMembership(m)}>Close Membership</Btn>
+                      )
+                    )}
                   </div>
                 </div>
               </div>
@@ -3865,8 +4033,8 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
                     </div>
                     <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                       <Badge
-                        label={req.status === "pending" ? "Pending" : req.status === "approved" ? "Approved" : "Rejected"}
-                        color={req.status === "pending" ? C.orange : req.status === "approved" ? C.greenMid : C.red}
+                        label={req.status === "pending" ? "Pending" : req.status === "approved" ? "Approved" : req.status === "cancelled" ? "Cancelled" : "Rejected"}
+                        color={req.status === "pending" ? C.orange : req.status === "approved" ? C.greenMid : req.status === "cancelled" ? C.gray600 : C.red}
                       />
                       {req.status === "pending" && (
                         <>
@@ -5197,6 +5365,161 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
         </div>
       </Modal>
 
+      {/* ── CLOSE MEMBERSHIP MODAL ── */}
+      {closeModal && (() => {
+        const m = members.find(x => x.id === closeModal.member.id) || closeModal.member;
+        const plan = resolveMemberPlan(m);
+        const dismiss = () => setCloseModal(null);
+
+        // Readiness checks. None of these block the close — the librarian is trusted to judge
+        // (a member who moved away is never returning the book) — but everything still outstanding
+        // is shown here and written to the member's comments as part of the closure note.
+        const { months: dueMonths } = outstandingMonthsFor(m);
+        const monthlyCost = plan?.cost || 0;
+        const duesAmount  = dueMonths.length * monthlyCost;
+        const penalties   = m.fees || 0;
+        const onLoan   = (transactions || []).filter(t => t.memberId === m.id && !t.returnDate);
+        const openReqs  = (requests || []).filter(r => r.memberId === m.id && r.status === "pending");
+        const openWaits = (waitlist || []).filter(w => w.memberId === m.id && (w.status === "waiting" || w.status === "reserved"));
+
+        const deposit  = depositSummaryFor(m);
+        const refund   = Math.max(0, Number(closeForm.refundAmount) || 0);
+        const deducted = Math.max(0, deposit.net - refund);
+
+        const warnings = [];
+        if (dueMonths.length) warnings.push(`${dueMonths.length} unpaid month${dueMonths.length !== 1 ? "s" : ""} (₹${duesAmount.toLocaleString()})`);
+        if (penalties > 0)    warnings.push(`₹${penalties.toLocaleString()} penalties`);
+        if (onLoan.length)    warnings.push(`${onLoan.length} book${onLoan.length !== 1 ? "s" : ""} not returned`);
+
+        // Refunding more than the library holds is a typo, not a decision — that one is blocked.
+        // Withholding part of the deposit is a decision, and needs a reason on the record.
+        const refundTooHigh = refund > deposit.net;
+        const needsNote = deducted > 0 && !closeForm.deductionNote.trim();
+
+        const check = (ok, label, detail, action) => (
+          <div key={label} style={{ display: "flex", alignItems: "flex-start", gap: 9, padding: "8px 0", borderBottom: `1px solid ${C.gray100}` }}>
+            <span style={{ width: 18, height: 18, borderRadius: "50%", background: ok ? C.greenMid + "22" : C.red + "22", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1 }}>
+              <Icon name={ok ? "check" : "alert"} size={11} color={ok ? C.greenMid : C.red} />
+            </span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: ok ? C.gray900 : C.red }}>{label}</div>
+              <div style={{ fontSize: 11.5, color: C.gray600, marginTop: 1 }}>{detail}</div>
+            </div>
+            {!ok && action && (
+              <button onClick={action.onClick} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: C.blue, fontSize: 11.5, fontWeight: 700, fontFamily: "inherit", whiteSpace: "nowrap", textDecoration: "underline" }}>
+                {action.label}
+              </button>
+            )}
+          </div>
+        );
+
+        const confirmClose = () => {
+          const lines = [`Close the membership of ${m.name} (${m.membershipId || m.id})?`, ""];
+          if (refund > 0) lines.push(`Refund ₹${refund.toLocaleString()} via ${closeForm.paymentMethod.toUpperCase()}`);
+          else lines.push("No deposit refund will be recorded");
+          if (deducted > 0) lines.push(`Withholding ₹${deducted.toLocaleString()} — ${closeForm.deductionNote.trim()}`);
+          if (warnings.length) lines.push("", `Still outstanding: ${warnings.join("; ")}`);
+          if (openReqs.length || openWaits.length) {
+            lines.push("", `Will be cancelled: ${[openReqs.length ? `${openReqs.length} pending request${openReqs.length !== 1 ? "s" : ""}` : null,
+              openWaits.length ? `${openWaits.length} waitlist entr${openWaits.length !== 1 ? "ies" : "y"}` : null].filter(Boolean).join(" and ")}`);
+          }
+          lines.push("", "The member will no longer be able to log in.");
+          if (!window.confirm(lines.join("\n"))) return;
+          closeMembership(m, { ...closeForm, warnings });
+        };
+
+        return (
+          <Modal open title="Close Membership" width={520} onClose={dismiss}>
+            <div>
+              {/* Member */}
+              <div style={{ background: C.gray50, border: `1px solid ${C.gray100}`, borderRadius: 10, padding: "12px 16px", marginBottom: 16 }}>
+                <div style={{ fontWeight: 700, fontSize: 15, color: C.green }}>{m.name}</div>
+                <div style={{ fontSize: 12, color: C.gray600, marginTop: 2, fontFamily: "monospace" }}>{m.membershipId || m.id}</div>
+                <div style={{ fontSize: 12, color: C.gray600, marginTop: 4 }}>
+                  {memberPlanLabel(m) || "No plan"}{m.joined ? ` · Member since ${m.joined}` : ""}
+                </div>
+              </div>
+
+              {/* Readiness */}
+              <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Before closing</div>
+              <div style={{ marginBottom: 16 }}>
+                {check(dueMonths.length === 0 && penalties === 0, "Dues settled",
+                  dueMonths.length === 0 && penalties === 0
+                    ? "Nothing outstanding"
+                    : [dueMonths.length ? `${dueMonths.length} month${dueMonths.length !== 1 ? "s" : ""} unpaid (₹${duesAmount.toLocaleString()}) — ${dueMonths.join(", ")}` : null,
+                       penalties > 0 ? `₹${penalties.toLocaleString()} penalties` : null].filter(Boolean).join(" · "),
+                  { label: "Collect", onClick: () => { dismiss(); setRenewModal({ member: m, plan }); } })}
+                {check(onLoan.length === 0, "Books returned",
+                  onLoan.length === 0 ? "No books on loan" : onLoan.map(t => t.bookTitle || t.bookId).join(", "),
+                  { label: "Active Loans", onClick: () => { dismiss(); setSelectedMember(null); setTab("loans"); } })}
+                {check(openReqs.length === 0 && openWaits.length === 0, "Queue clear",
+                  openReqs.length === 0 && openWaits.length === 0
+                    ? "No pending requests or waitlist entries"
+                    : `${[openReqs.length ? `${openReqs.length} pending request${openReqs.length !== 1 ? "s" : ""}` : null,
+                          openWaits.length ? `${openWaits.length} waitlist entr${openWaits.length !== 1 ? "ies" : "y"}` : null]
+                         .filter(Boolean).join(" and ")} — will be cancelled on close`)}
+              </div>
+
+              {warnings.length > 0 && (
+                <div style={{ background: C.redLight, border: `1px solid ${C.red}40`, borderRadius: 8, padding: "10px 14px", marginBottom: 16, fontSize: 12, color: C.red, lineHeight: 1.5 }}>
+                  <strong>This membership is not settled.</strong> You can still close it — what is outstanding will be recorded on the member's profile.
+                </div>
+              )}
+
+              {/* Deposit refund */}
+              <div style={{ fontSize: 11, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>Deposit refund</div>
+              <div style={{ background: C.blueLight, border: `1px solid ${C.blue}30`, borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 12.5 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", color: C.gray600, marginBottom: 3 }}>
+                  <span>Deposit collected</span><span style={{ fontWeight: 600 }}>₹{deposit.collected.toLocaleString()}</span>
+                </div>
+                {deposit.refunded > 0 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", color: C.gray600, marginBottom: 3 }}>
+                    <span>Already refunded</span><span style={{ fontWeight: 600 }}>−₹{deposit.refunded.toLocaleString()}</span>
+                  </div>
+                )}
+                <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 800, color: C.blue, borderTop: `1px solid ${C.blue}25`, paddingTop: 5, marginTop: 4 }}>
+                  <span>Refundable</span><span>₹{deposit.net.toLocaleString()}</span>
+                </div>
+              </div>
+
+              <Input label="Refund now (₹)" type="number" min="0" value={closeForm.refundAmount}
+                onChange={e => setCloseForm(f => ({ ...f, refundAmount: e.target.value }))}
+                error={refundTooHigh ? `Cannot refund more than the ₹${deposit.net.toLocaleString()} on record.` : ""}
+                hint={deducted > 0 ? `Withholding ₹${deducted.toLocaleString()} of the deposit.` : "Set to 0 if no refund is being paid out."} />
+
+              {deducted > 0 && (
+                <Input label="Reason for deduction" value={closeForm.deductionNote}
+                  onChange={e => setCloseForm(f => ({ ...f, deductionNote: e.target.value }))}
+                  placeholder="e.g. lost book, damaged copy, unpaid dues"
+                  required error={needsNote ? "Say why part of the deposit is being withheld." : ""} />
+              )}
+
+              {refund > 0 && (
+                <Select label="Refund paid by" value={closeForm.paymentMethod}
+                  onChange={e => setCloseForm(f => ({ ...f, paymentMethod: e.target.value }))}
+                  options={[{ value: "upi", label: "UPI" }, { value: "cash", label: "Cash" }, { value: "bank", label: "Bank transfer" }]} />
+              )}
+
+              <Input label="Closure date" type="date" value={closeForm.date}
+                onChange={e => setCloseForm(f => ({ ...f, date: e.target.value }))} />
+
+              <div style={{ background: C.gray50, borderRadius: 8, padding: "10px 14px", fontSize: 11.5, color: C.gray600, lineHeight: 1.6, marginBottom: 18 }}>
+                Closing will mark the membership <strong>Closed</strong>, record the refund in Payments as
+                a <strong>Refund - Deposit</strong> row, revoke the member's login, and cancel any pending
+                requests and waitlist entries (returning the held copies to the shelf).
+              </div>
+
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <Btn variant="ghost" onClick={dismiss}>Cancel</Btn>
+                <Btn variant="danger" icon="logout" disabled={refundTooHigh || needsNote} onClick={confirmClose}>
+                  {refund > 0 ? `Refund ₹${refund.toLocaleString()} & Close` : "Close Membership"}
+                </Btn>
+              </div>
+            </div>
+          </Modal>
+        );
+      })()}
+
       {/* ── RENEW MEMBER MODAL ── */}
       {renewModal && (() => {
         const { member: m, plan: modalPlan } = renewModal;
@@ -5207,30 +5530,10 @@ const mRequests = (requests || []).filter(r => r.memberId === m.id);
 
         // Recompute the outstanding months here (rather than trusting the caller) so the modal works
         // whether it's opened from the Renewals tab (which precomputes this) or the Members tab
-        // pop-out (which doesn't). Sourced from payments.fee_paid_month — same as the Renewals list —
-        // not status.last_paid_month, which drifts stale the moment a payment lands any other way.
-        const memberSubs = (payments || []).filter(p => p.memberId === m.membershipId && /subscription/i.test(p.paymentType) && p.feePaidMonth);
-        const memberPaidKeys = new Set(memberSubs.map(p => normalizeMonthKey(p.feePaidMonth)).filter(Boolean));
+        // pop-out (which doesn't).
+        const { months: outstandingMonths, paidKeys: memberPaidKeys } = outstandingMonthsFor(m);
         const monthlyCost = plan?.cost || 0;
         const currentMonthLabel = monthYearLabel(renewalCurrentMonthStart.getFullYear(), renewalCurrentMonthStart.getMonth());
-
-        // Same arrears window as the Renewals list: from max(join month, cutoff) to last month,
-        // plus the current month, minus anything already settled.
-        const modalJoined = m.joined ? new Date(m.joined) : null;
-        const modalJoinStart = modalJoined && !isNaN(modalJoined)
-          ? new Date(modalJoined.getFullYear(), modalJoined.getMonth(), 1) : null;
-        const modalArrearsStart = modalJoinStart && arrearsFromMonthStart
-          ? new Date(Math.max(modalJoinStart.getTime(), arrearsFromMonthStart.getTime()))
-          : (arrearsFromMonthStart || new Date(renewalCurrentMonthStart));
-        const outstandingMonths = [];
-        {
-          const cursor = new Date(modalArrearsStart);
-          while (cursor <= renewalCurrentMonthStart) {
-            const label = monthKeyLabel(cursor);
-            if (!memberPaidKeys.has(normalizeMonthKey(label))) outstandingMonths.push(label);
-            cursor.setMonth(cursor.getMonth() + 1);
-          }
-        }
         // Advance months sit after the current one — some members pay several months ahead.
         const advanceMonths = [];
         for (let i = 1; i <= advanceCount; i++) {
