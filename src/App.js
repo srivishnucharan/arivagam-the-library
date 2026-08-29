@@ -210,18 +210,14 @@ const DEFAULT_PLANS = [
   { id: "plan-inhouse", name: "Inhouse Reading",   borrowLimit: 0, cost: 0,    refundableDeposit: 0, inhouseOnly: true },
 ];
 
-// The library names the same five plans two ways. The status table and the older payments rows
-// use borrow counts ("1 Book", "2 Books", "In Library Reading"); users.membership_plan and Fee
-// Settings use the reader names. Everything the user sees should read as the reader name, so map
-// the count vocabulary onto it. Keys are normalized by normalizePlanKey below.
-const PLAN_NAME_ALIASES = {
-  "1 book":             "Leisure Reader",
-  "2 book":             "Standard Reader",
-  "3 book":             "Voracious Reader",
-  "4 book":             "Super Reader",
-  "in library reading": "Inhouse Reading",
-  "inhouse reading":    "Inhouse Reading",
-};
+// The library names the same plans two ways. The status table and the older payments rows use
+// borrow counts ("1 Book", "2 Books", "In Library Reading"); Fee Settings and users.membership_plan
+// use the reader names the librarian chose. Everything on screen should read as the reader name.
+//
+// That mapping is derived from each plan's borrowLimit rather than hard-coded, because hard-coding
+// it goes stale the moment a plan is renamed — which is exactly what happened when "5 Book Plan"
+// and "6 Book Plan" became "Ultra Reader" and "Elite Reader", silently stranding every "6 Books"
+// row in the data. borrowLimit survives renames and repricing, and covers plans added later.
 // Squashes the spelling drift the sheet has accumulated over the years — "1 Book Plan",
 // "1 Boook", "2-Books" all normalize to the same key.
 const normalizePlanKey = (raw) => String(raw || "").trim().toLowerCase()
@@ -231,8 +227,13 @@ const normalizePlanKey = (raw) => String(raw || "").trim().toLowerCase()
   .replace(/\s+/g, " ")
   .trim()
   .replace(/s$/, "");
-// "2 Books" -> "Standard Reader"; anything with no alias (e.g. "6 Books", "PIE", "Donor") -> "".
-const canonicalPlanName = (raw) => PLAN_NAME_ALIASES[normalizePlanKey(raw)] || "";
+// "2 Books" -> 2, "1 Book Plan" -> 1; anything that is not a borrow count ("PIE") -> null.
+const planBorrowCount = (raw) => {
+  const m = normalizePlanKey(raw).match(/^(\d+)\s*book$/);
+  return m ? parseInt(m[1], 10) : null;
+};
+// The one plan that is named by what it allows rather than by a count.
+const isInhousePlanLabel = (raw) => /^(in library reading|in library|inhouse reading|inhouse)$/.test(normalizePlanKey(raw));
 // Resolves any plan reference against the configured plans: a plan id ("plan-pro"), a plan name
 // ("Standard Reader"), or a status-table label ("2 Books"). Returns null when nothing matches.
 const findPlan = (planList, ref) => {
@@ -241,16 +242,18 @@ const findPlan = (planList, ref) => {
   const key = String(ref).trim().toLowerCase();
   const byName = (name) => name && list.find(pl => String(pl.name || "").trim().toLowerCase() === name);
   const normalized = normalizePlanKey(ref);
+  const count = planBorrowCount(ref);
   return list.find(pl => pl.id === ref)
       || byName(key)
-      || byName(canonicalPlanName(ref).toLowerCase())
+      || (count !== null ? list.find(pl => pl.borrowLimit === count) : null)
+      || (isInhousePlanLabel(ref) ? list.find(pl => pl.inhouseOnly || pl.borrowLimit === 0) : null)
       || (normalized ? list.find(pl => normalizePlanKey(pl.name) === normalized) : null)
       || null;
 };
-// What to print for a plan reference: the configured plan's name, else the canonical reader name,
-// else the raw text so unmapped labels ("6 Books", "PIE") still show something truthful.
+// What to print for a plan reference: the configured plan's name, else the raw text so labels with
+// no plan behind them ("PIE", "Donor", "Unknown") still show something truthful.
 const planDisplayLabel = (ref, planList) =>
-  findPlan(planList, ref)?.name || canonicalPlanName(ref) || (ref ? String(ref).trim() : "");
+  findPlan(planList, ref)?.name || (ref ? String(ref).trim() : "");
 
 const DEFAULT_SETTINGS = {
   sections: {
